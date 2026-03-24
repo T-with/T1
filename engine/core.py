@@ -653,6 +653,227 @@ class AIMultiFactorStrategy:
 
         return buy, sell
 
+    @staticmethod
+    def analyze(df: pd.DataFrame, params: Dict) -> Dict:
+        """
+        完整 AI 分析报告 — 用于仪表盘
+        返回：模型状态、因子重要性、预测概率、市场状态、信号详情
+        """
+        from xgboost import XGBClassifier
+
+        train_window = params.get('train_window', 500)
+        buy_threshold = params.get('buy_threshold', 0.6)
+        sell_threshold = params.get('sell_threshold', 0.4)
+        target_return = params.get('target_return', 0.002)
+        n_estimators = params.get('n_estimators', 100)
+        max_depth = params.get('max_depth', 5)
+        learning_rate = params.get('learning_rate', 0.1)
+
+        result = {
+            'status': 'error',
+            'model': {},
+            'factors': {},
+            'prediction': {},
+            'regime': {},
+            'signal': {},
+            'history': [],
+        }
+
+        if len(df) < train_window + 60:
+            result['status'] = 'insufficient_data'
+            result['model']['message'] = f'需要至少 {train_window + 60} 根K线，当前 {len(df)} 根'
+            return result
+
+        # 1. 计算因子
+        fdf = AIMultiFactorStrategy.compute_factors(df)
+        factor_cols = AIMultiFactorStrategy.get_factor_columns(fdf)
+
+        # 2. 准备训练数据
+        train_df = fdf.iloc[-(train_window + 1):-1].copy()
+        train_df = train_df[factor_cols + ['close']].dropna()
+        if len(train_df) < 100:
+            result['status'] = 'insufficient_clean_data'
+            return result
+
+        train_df['target'] = (train_df['close'].shift(-1) / train_df['close'] - 1 > target_return).astype(int)
+        train_df = train_df.dropna(subset=['target'])
+
+        X_train = train_df[factor_cols].values
+        y_train = train_df['target'].values
+
+        if len(np.unique(y_train)) < 2:
+            result['status'] = 'single_class'
+            return result
+
+        # 3. 训练模型
+        model = XGBClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            use_label_encoder=False,
+            eval_metric='logloss',
+            random_state=42,
+            n_jobs=1,
+        )
+        model.fit(X_train, y_train)
+
+        # 4. 特征重要性
+        importances = model.feature_importances_
+        factor_importance = sorted(
+            zip(factor_cols, importances.tolist()),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        # 归一化到 0-100
+        max_imp = max(imp for _, imp in factor_importance) if factor_importance else 1
+        factor_importance = [(name, round(imp / max_imp * 100, 1)) for name, imp in factor_importance]
+
+        # 5. 预测最新一根
+        latest = fdf.iloc[[-1]][factor_cols].fillna(0)
+        prob = model.predict_proba(latest.values)[0]
+        buy_prob = float(prob[1]) if len(prob) > 1 else float(prob[0])
+
+        current_price = float(df.iloc[-1]['close'])
+
+        # 信号判断
+        if buy_prob >= buy_threshold:
+            signal = 'buy'
+            signal_text = '建议买入'
+            signal_confidence = buy_prob
+        elif buy_prob <= sell_threshold:
+            signal = 'sell'
+            signal_text = '建议卖出'
+            signal_confidence = 1 - buy_prob
+        else:
+            signal = 'hold'
+            signal_text = '观望'
+            signal_confidence = max(buy_prob, 1 - buy_prob)
+
+        # 6. 市场状态判断
+        ret_20 = df['close'].pct_change(20).iloc[-1]
+        vol_20 = df['close'].pct_change().rolling(20).std().iloc[-1]
+        sma_50 = df['close'].rolling(50).mean().iloc[-1]
+
+        if ret_20 > 0.05 and current_price > sma_50:
+            regime = 'bull'
+            regime_text = '牛市'
+            regime_color = 'green'
+        elif ret_20 < -0.05 and current_price < sma_50:
+            regime = 'bear'
+            regime_text = '熊市'
+            regime_color = 'red'
+        else:
+            regime = 'sideways'
+            regime_text = '震荡'
+            regime_color = 'yellow'
+
+        # 7. 模型性能指标（在训练集上的表现）
+        train_pred = model.predict(X_train)
+        train_acc = float(np.mean(train_pred == y_train))
+
+        # Walk-forward 验证（最后 20% 做验证）
+        split = int(len(X_train) * 0.8)
+        val_pred = model.predict(X_train[split:])
+        val_acc = float(np.mean(val_pred == y_train[split:]))
+
+        # 8. 最近 N 根 K 线的预测概率历史
+        history = []
+        n_hist = min(30, len(fdf) - train_window - 1)
+        for i in range(-n_hist, 0):
+            try:
+                row = fdf.iloc[i - 1][factor_cols].fillna(0).values.reshape(1, -1)
+                if not np.isnan(row).any():
+                    p = model.predict_proba(row)[0]
+                    bp = float(p[1]) if len(p) > 1 else float(p[0])
+                    history.append({
+                        'time': str(fdf.index[i - 1]),
+                        'price': round(float(fdf.iloc[i - 1]['close']), 2),
+                        'buy_prob': round(bp * 100, 1),
+                    })
+            except Exception:
+                continue
+
+        result = {
+            'status': 'ok',
+            'model': {
+                'type': 'XGBClassifier',
+                'n_estimators': n_estimators,
+                'max_depth': max_depth,
+                'train_samples': len(X_train),
+                'train_accuracy': round(train_acc * 100, 1),
+                'val_accuracy': round(val_acc * 100, 1),
+                'positive_ratio': round(float(np.mean(y_train)) * 100, 1),
+                'n_features': len(factor_cols),
+            },
+            'factors': {
+                'top_15': [{'name': n, 'importance': v} for n, v in factor_importance[:15]],
+                'categories': AIMultiFactorStrategy._factor_category_importance(factor_importance),
+            },
+            'prediction': {
+                'buy_probability': round(buy_prob * 100, 1),
+                'sell_probability': round((1 - buy_prob) * 100, 1),
+                'current_price': round(current_price, 2),
+                'threshold_buy': buy_threshold * 100,
+                'threshold_sell': sell_threshold * 100,
+            },
+            'regime': {
+                'state': regime,
+                'text': regime_text,
+                'color': regime_color,
+                'volatility': round(float(vol_20 * 100), 2),
+                'trend_20d': round(float(ret_20 * 100), 2),
+            },
+            'signal': {
+                'action': signal,
+                'text': signal_text,
+                'confidence': round(signal_confidence * 100, 1),
+                'price': round(current_price, 2),
+            },
+            'history': history,
+        }
+
+        return result
+
+    @staticmethod
+    def _factor_category_importance(factor_importance: list) -> list:
+        """按因子类别汇总重要性"""
+        categories = {
+            '动量': [], '波动率': [], '技术指标': [], '趋势': [],
+            '量价': [], '形态': [], '均值回归': [], '时间': [],
+        }
+        cat_prefix = {
+            'mom_': '动量', 'vol_': '波动率', 'vol_ratio': '波动率',
+            'rsi_': '技术指标', 'macd_': '技术指标', 'bb_': '技术指标', 'atr': '技术指标',
+            'sma_dist': '趋势', 'ema_dist': '趋势',
+            'vol_ratio': '量价', 'price_vol': '量价', 'obv_': '量价',
+            'body_': '形态', 'upper_': '形态', 'lower_': '形态',
+            'zscore_': '均值回归',
+            'hour_': '时间', 'dow_': '时间',
+        }
+        for name, imp in factor_importance:
+            assigned = False
+            for prefix, cat in cat_prefix.items():
+                if name.startswith(prefix):
+                    categories[cat].append(imp)
+                    assigned = True
+                    break
+            if not assigned:
+                # fallback: 检查包含关系
+                for prefix, cat in cat_prefix.items():
+                    if prefix in name:
+                        categories[cat].append(imp)
+                        break
+
+        return [
+            {'name': k, 'avg_importance': round(sum(v) / len(v), 1) if v else 0, 'count': len(v)}
+            for k, v in sorted(categories.items(), key=lambda x: sum(x[1]) / max(len(x[1]), 1), reverse=True)
+            if v
+        ]
+
 
 # ================================================================
 # 交易所客户端 — 含本地缓存

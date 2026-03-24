@@ -14,6 +14,7 @@ from engine.core import (
     filter_strategy_config, encrypt_exchange_config,
     decrypt_exchange_config, redact_secrets,
     decrypt_strategy_secrets,
+    AIMultiFactorStrategy,
 )
 
 app = Flask(__name__)
@@ -111,6 +112,10 @@ def live_page():
 @app.route('/settings')
 def settings_page():
     return render_template('settings.html')
+
+@app.route('/ai')
+def ai_page():
+    return render_template('ai.html')
 
 @app.route('/health')
 def health():
@@ -349,6 +354,38 @@ def api_kline(symbol):
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ================================================================
+# API: AI 分析
+# ================================================================
+
+@app.route('/api/ai/analyze', methods=['POST'])
+def api_ai_analyze():
+    """AI 多因子分析 — 返回完整报告"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        params = data.get('params', {})
+
+        exchange_cfg = load_exchange()
+        client = ExchangeClient(exchange_cfg.get('exchange_id', 'binance'))
+
+        # 获取足够的 K 线数据
+        train_window = params.get('train_window', 500)
+        limit = train_window + 100
+        df = client.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+        if df.empty:
+            return jsonify({'error': '无法获取数据'}), 400
+
+        result = AIMultiFactorStrategy.analyze(df, params)
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"AI analyze error: {e}", exc_info=True)
+        return jsonify({'error': str(e), 'status': 'error'}), 500
 
 
 # ================================================================

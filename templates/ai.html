@@ -1,0 +1,502 @@
+{% extends "base.html" %}
+{% block title %}AI 分析 — MyTradingPlatform{% endblock %}
+
+{% block head %}
+<style>
+    .gauge-container { position: relative; width: 220px; height: 130px; margin: 0 auto; }
+    .gauge-bg { fill: none; stroke: #30363d; stroke-width: 18; }
+    .gauge-fill { fill: none; stroke-width: 18; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
+    .gauge-text { font-size: 2rem; font-weight: 700; }
+    .gauge-label { font-size: 0.8rem; fill: var(--text-dim); }
+    .signal-badge { font-size: 1.8rem; font-weight: 700; padding: 1rem 2rem; border-radius: 12px; }
+    .signal-buy { background: rgba(63,185,80,0.15); color: var(--green); border: 2px solid var(--green); }
+    .signal-sell { background: rgba(248,81,73,0.15); color: var(--red); border: 2px solid var(--red); }
+    .signal-hold { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 2px solid var(--text-dim); }
+    .factor-bar { height: 8px; border-radius: 4px; transition: width 0.8s ease; }
+    .regime-card { text-align: center; padding: 2rem; }
+    .regime-icon { font-size: 3rem; }
+    .loading-shimmer { background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-hover) 50%, var(--bg-card) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    .category-pill { display: inline-block; padding: 0.3rem 0.8rem; border-radius: 20px; margin: 0.2rem; font-size: 0.8rem; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- 控制栏 -->
+<div class="card mb-3">
+    <div class="card-body d-flex align-items-center gap-3 flex-wrap">
+        <div>
+            <label class="form-label small mb-1">交易对</label>
+            <select class="form-select form-select-sm" id="ai-symbol">
+                <option value="BTC/USDT">BTC/USDT</option>
+                <option value="ETH/USDT">ETH/USDT</option>
+                <option value="SOL/USDT">SOL/USDT</option>
+                <option value="BNB/USDT">BNB/USDT</option>
+            </select>
+        </div>
+        <div>
+            <label class="form-label small mb-1">K线周期</label>
+            <select class="form-select form-select-sm" id="ai-timeframe">
+                <option value="1h" selected>1H</option>
+                <option value="4h">4H</option>
+                <option value="1d">1D</option>
+            </select>
+        </div>
+        <div>
+            <label class="form-label small mb-1">买入阈值</label>
+            <input type="number" class="form-control form-control-sm" id="ai-buy-th" value="0.60" step="0.05" style="width:80px;">
+        </div>
+        <div>
+            <label class="form-label small mb-1">卖出阈值</label>
+            <input type="number" class="form-control form-control-sm" id="ai-sell-th" value="0.40" step="0.05" style="width:80px;">
+        </div>
+        <div class="ms-auto">
+            <button class="btn btn-primary" id="ai-run-btn" onclick="runAnalysis()">
+                <i class="bi bi-lightning-charge-fill"></i> 开始分析
+            </button>
+            <div class="form-check form-switch d-inline-block ms-3 align-middle">
+                <input class="form-check-input" type="checkbox" id="ai-auto-refresh">
+                <label class="form-check-label small">自动刷新</label>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 结果区域 -->
+<div id="ai-results" style="display:none;">
+
+<!-- 顶部三栏：信号 / 预测概率 / 市场状态 -->
+<div class="row g-3 mb-3">
+    <!-- 交易信号 -->
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-lightning"></i> AI 交易信号</h6></div>
+            <div class="card-body text-center d-flex flex-column justify-content-center">
+                <div id="signal-badge" class="signal-badge signal-hold mb-3">--</div>
+                <div class="text-muted">置信度: <strong id="signal-confidence">--</strong>%</div>
+                <div class="text-muted mt-1">当前价格: <strong id="signal-price">--</strong></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 预测概率仪表盘 -->
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-speedometer2"></i> 预测概率</h6></div>
+            <div class="card-body d-flex flex-column align-items-center justify-content-center">
+                <svg class="gauge-container" viewBox="0 0 220 130">
+                    <path class="gauge-bg" d="M 20 120 A 90 90 0 0 1 200 120" />
+                    <path class="gauge-fill" id="gauge-arc" d="M 20 120 A 90 90 0 0 1 200 120"
+                          stroke="var(--green)" stroke-dasharray="283" stroke-dashoffset="283" />
+                    <text x="110" y="100" text-anchor="middle" class="gauge-text" fill="var(--text)" id="gauge-value">--</text>
+                    <text x="110" y="120" text-anchor="middle" class="gauge-label">买入概率</text>
+                </svg>
+                <div class="d-flex justify-content-between w-100 px-3 mt-2">
+                    <span class="small text-muted">卖出 <span id="prob-sell">--</span>%</span>
+                    <span class="small text-muted">买入 <span id="prob-buy">--</span>%</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 市场状态 -->
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-compass"></i> 市场状态</h6></div>
+            <div class="card-body regime-card">
+                <div class="regime-icon" id="regime-icon">--</div>
+                <div class="h5 mt-2" id="regime-text">--</div>
+                <div class="text-muted small mt-2">
+                    <div>20日趋势: <span id="regime-trend">--</span></div>
+                    <div>波动率: <span id="regime-vol">--</span>%</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 模型状态 -->
+<div class="card mb-3">
+    <div class="card-header"><h6 class="mb-0"><i class="bi bi-cpu"></i> 模型状态</h6></div>
+    <div class="card-body">
+        <div class="row text-center">
+            <div class="col-6 col-md-2 mb-2">
+                <div class="stat-value blue" id="model-type">--</div>
+                <div class="stat-label">模型类型</div>
+            </div>
+            <div class="col-6 col-md-2 mb-2">
+                <div class="stat-value" id="model-features">--</div>
+                <div class="stat-label">特征数</div>
+            </div>
+            <div class="col-6 col-md-2 mb-2">
+                <div class="stat-value" id="model-train-samples">--</div>
+                <div class="stat-label">训练样本</div>
+            </div>
+            <div class="col-6 col-md-2 mb-2">
+                <div class="stat-value green" id="model-train-acc">--</div>
+                <div class="stat-label">训练准确率</div>
+            </div>
+            <div class="col-6 col-md-2 mb-2">
+                <div class="stat-value blue" id="model-val-acc">--</div>
+                <div class="stat-label">验证准确率</div>
+            </div>
+            <div class="col-6 col-md-2 mb-2">
+                <div class="stat-value" id="model-pos-ratio">--</div>
+                <div class="stat-label">正样本比</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <!-- 因子重要性 TOP 15 -->
+    <div class="col-md-7">
+        <div class="card h-100">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-bar-chart-steps"></i> 因子重要性 TOP 15</h6></div>
+            <div class="card-body" id="factor-importance-list">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 因子类别分布 -->
+    <div class="col-md-5">
+        <div class="card h-100">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-pie-chart"></i> 因子类别贡献</h6></div>
+            <div class="card-body d-flex flex-column align-items-center">
+                <canvas id="category-chart" width="280" height="280"></canvas>
+                <div id="category-pills" class="mt-2 text-center"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 预测概率历史 -->
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h6 class="mb-0"><i class="bi bi-graph-up"></i> 预测概率走势</h6>
+        <span class="text-muted small" id="history-range">--</span>
+    </div>
+    <div class="card-body">
+        <canvas id="prob-history-chart" height="120"></canvas>
+    </div>
+</div>
+
+<!-- 底部分析结论 -->
+<div class="card">
+    <div class="card-header"><h6 class="mb-0"><i class="bi bi-journal-text"></i> AI 分析摘要</h6></div>
+    <div class="card-body" id="ai-summary">
+        <div class="loading">点击「开始分析」生成报告</div>
+    </div>
+</div>
+
+</div><!-- /ai-results -->
+
+<!-- 占位 -->
+<div class="card" id="ai-placeholder">
+    <div class="card-body text-center py-5">
+        <i class="bi bi-robot" style="font-size:4rem;color:var(--purple);"></i>
+        <h5 class="mt-3">AI 多因子分析</h5>
+        <p class="text-muted">配置参数后点击「开始分析」，AI 将训练 XGBoost 模型并生成详细报告</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+let catChart = null;
+let histChart = null;
+let autoRefreshTimer = null;
+
+// 因子名 → 中文映射
+const factorLabels = {
+    'mom_5': '5期动量', 'mom_10': '10期动量', 'mom_20': '20期动量', 'mom_60': '60期动量',
+    'vol_5': '5期波动率', 'vol_10': '10期波动率', 'vol_20': '20期波动率', 'vol_60': '60期波动率',
+    'vol_ratio_5_20': '波动率比',
+    'rsi_7': 'RSI(7)', 'rsi_14': 'RSI(14)', 'rsi_21': 'RSI(21)',
+    'macd_hist': 'MACD柱', 'macd_hist_slope': 'MACD斜率',
+    'bb_width': 'BB宽度', 'bb_position': 'BB位置', 'atr': 'ATR', 'atr_ratio': 'ATR比',
+    'sma_dist_10': 'SMA10距离', 'sma_dist_20': 'SMA20距离', 'sma_dist_50': 'SMA50距离',
+    'ema_dist_10': 'EMA10距离', 'ema_dist_20': 'EMA20距离', 'ema_dist_50': 'EMA50距离',
+    'vol_ratio': '量比', 'price_vol_corr': '价量相关', 'obv_slope_10': 'OBV斜率',
+    'body_ratio': '实体比', 'upper_shadow': '上影线', 'lower_shadow': '下影线',
+    'zscore_20': 'Z值(20)', 'zscore_60': 'Z值(60)',
+    'hour_sin': '小时(sin)', 'hour_cos': '小时(cos)', 'dow_sin': '星期(sin)', 'dow_cos': '星期(cos)',
+};
+
+const catColors = {
+    '动量': '#58a6ff', '波动率': '#d29922', '技术指标': '#bc8cff',
+    '趋势': '#3fb950', '量价': '#f85149', '形态': '#79c0ff',
+    '均值回归': '#d2a8ff', '时间': '#8b949e',
+};
+
+function getFactorLabel(name) {
+    return factorLabels[name] || name.replace(/_/g, ' ');
+}
+
+async function runAnalysis() {
+    const btn = document.getElementById('ai-run-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 训练中...';
+
+    try {
+        const data = {
+            symbol: document.getElementById('ai-symbol').value,
+            timeframe: document.getElementById('ai-timeframe').value,
+            params: {
+                train_window: 500,
+                buy_threshold: parseFloat(document.getElementById('ai-buy-th').value) || 0.6,
+                sell_threshold: parseFloat(document.getElementById('ai-sell-th').value) || 0.4,
+                n_estimators: 100,
+                max_depth: 5,
+                target_return: 0.002,
+            },
+        };
+
+        const r = await API.post('/api/ai/analyze', data);
+
+        if (r.error || r.status !== 'ok') {
+            toast(r.error || r.status || '分析失败', 'danger');
+            return;
+        }
+
+        document.getElementById('ai-placeholder').style.display = 'none';
+        document.getElementById('ai-results').style.display = 'block';
+
+        renderSignal(r.signal);
+        renderGauge(r.prediction);
+        renderRegime(r.regime);
+        renderModel(r.model);
+        renderFactors(r.factors);
+        renderHistory(r.history);
+        renderSummary(r, data);
+
+    } catch (e) {
+        toast('分析失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-lightning-charge-fill"></i> 开始分析';
+    }
+}
+
+function renderSignal(s) {
+    const badge = document.getElementById('signal-badge');
+    badge.className = 'signal-badge';
+    if (s.action === 'buy') {
+        badge.classList.add('signal-buy');
+        badge.textContent = '⬆ 买入';
+    } else if (s.action === 'sell') {
+        badge.classList.add('signal-sell');
+        badge.textContent = '⬇ 卖出';
+    } else {
+        badge.classList.add('signal-hold');
+        badge.textContent = '⏸ 观望';
+    }
+    document.getElementById('signal-confidence').textContent = s.confidence;
+    document.getElementById('signal-price').textContent = fmt(s.price);
+}
+
+function renderGauge(p) {
+    const buyPct = p.buy_probability;
+    // 半圆弧长 283, 0%=满(283), 100%=空(0)
+    const offset = 283 - (283 * buyPct / 100);
+    const arc = document.getElementById('gauge-arc');
+    arc.style.strokeDashoffset = offset;
+
+    if (buyPct >= 60) arc.style.stroke = 'var(--green)';
+    else if (buyPct <= 40) arc.style.stroke = 'var(--red)';
+    else arc.style.stroke = 'var(--yellow)';
+
+    document.getElementById('gauge-value').textContent = buyPct + '%';
+    document.getElementById('prob-buy').textContent = buyPct;
+    document.getElementById('prob-sell').textContent = p.sell_probability;
+}
+
+function renderRegime(r) {
+    const iconMap = { bull: '🐂', bear: '🐻', sideways: '⚖️' };
+    const colorMap = { bull: 'var(--green)', bear: 'var(--red)', sideways: 'var(--yellow)' };
+    document.getElementById('regime-icon').textContent = iconMap[r.state] || '❓';
+    document.getElementById('regime-text').textContent = r.text;
+    document.getElementById('regime-text').style.color = colorMap[r.state];
+    document.getElementById('regime-trend').textContent = (r.trend_20d >= 0 ? '+' : '') + r.trend_20d + '%';
+    document.getElementById('regime-trend').className = r.trend_20d >= 0 ? 'green' : 'red';
+    document.getElementById('regime-vol').textContent = r.volatility;
+}
+
+function renderModel(m) {
+    document.getElementById('model-type').textContent = 'XGBoost';
+    document.getElementById('model-features').textContent = m.n_features;
+    document.getElementById('model-train-samples').textContent = m.train_samples;
+    document.getElementById('model-train-acc').textContent = m.train_accuracy + '%';
+    document.getElementById('model-val-acc').textContent = m.val_accuracy + '%';
+    document.getElementById('model-pos-ratio').textContent = m.positive_ratio + '%';
+}
+
+function renderFactors(f) {
+    const container = document.getElementById('factor-importance-list');
+    if (!f.top_15 || f.top_15.length === 0) {
+        container.innerHTML = '<div class="text-muted text-center py-3">无数据</div>';
+        return;
+    }
+
+    const maxVal = f.top_15[0].importance;
+    container.innerHTML = f.top_15.map((item, i) => {
+        const pct = (item.importance / 100 * 100).toFixed(1);
+        const hue = 200 - (i / f.top_15.length) * 160; // 蓝→绿渐变
+        return `<div class="mb-2">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <span class="small"><span class="text-muted">#${i+1}</span> ${getFactorLabel(item.name)}</span>
+                <span class="small text-muted">${pct}%</span>
+            </div>
+            <div class="progress" style="height:8px;background:var(--bg-dark);">
+                <div class="progress-bar" style="width:${pct}%;background:hsl(${hue},70%,50%);"></div>
+            </div>
+        </div>`;
+    }).join('');
+
+    // 因子类别饼图
+    if (catChart) catChart.destroy();
+    const cats = f.categories;
+    const labels = cats.map(c => c.name);
+    const values = cats.map(c => c.avg_importance);
+    const colors = labels.map(l => catColors[l] || '#8b949e');
+
+    catChart = new Chart(document.getElementById('category-chart'), {
+        type: 'doughnut',
+        data: {
+            labels,
+            datasets: [{ data: values, backgroundColor: colors, borderColor: 'var(--bg-card)', borderWidth: 2 }],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: { color: '#8b949e', padding: 12, font: { size: 11 } },
+                },
+            },
+        },
+    });
+
+    // 类别标签
+    document.getElementById('category-pills').innerHTML = cats.map(c => {
+        const color = catColors[c.name] || '#8b949e';
+        return `<span class="category-pill" style="background:${color}22;color:${color};">${c.name} (${c.count})</span>`;
+    }).join('');
+}
+
+function renderHistory(hist) {
+    if (!hist || hist.length === 0) return;
+
+    if (histChart) histChart.destroy();
+    const labels = hist.map(h => (h.time || '').slice(5, 16));
+    const probs = hist.map(h => h.buy_prob);
+    const prices = hist.map(h => h.price);
+    const threshold = parseFloat(document.getElementById('ai-buy-th').value) * 100 || 60;
+
+    histChart = new Chart(document.getElementById('prob-history-chart'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: '买入概率 %',
+                    data: probs,
+                    borderColor: '#bc8cff',
+                    backgroundColor: 'rgba(188,140,255,0.1)',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    fill: true,
+                    yAxisID: 'y',
+                },
+                {
+                    label: '价格',
+                    data: prices,
+                    borderColor: '#58a6ff',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    borderDash: [4, 4],
+                    yAxisID: 'y1',
+                },
+                {
+                    label: '买入阈值',
+                    data: Array(labels.length).fill(threshold),
+                    borderColor: 'rgba(63,185,80,0.5)',
+                    borderWidth: 1,
+                    borderDash: [6, 3],
+                    pointRadius: 0,
+                    yAxisID: 'y',
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { labels: { color: '#8b949e' } } },
+            scales: {
+                x: { ticks: { color: '#8b949e', maxTicksLimit: 10 }, grid: { color: '#30363d' } },
+                y: {
+                    position: 'left', min: 0, max: 100,
+                    ticks: { color: '#bc8cff' }, grid: { color: '#30363d' },
+                    title: { display: true, text: '概率 %', color: '#bc8cff' },
+                },
+                y1: {
+                    position: 'right',
+                    ticks: { color: '#58a6ff' }, grid: { display: false },
+                    title: { display: true, text: '价格', color: '#58a6ff' },
+                },
+            },
+        },
+    });
+
+    if (hist.length > 0) {
+        document.getElementById('history-range').textContent =
+            `${hist[0].time?.slice(5,16)} → ${hist[hist.length-1].time?.slice(5,16)}`;
+    }
+}
+
+function renderSummary(r, reqData) {
+    const m = r.model, p = r.prediction, s = r.signal, reg = r.regime;
+    const topFactors = r.factors.top_15?.slice(0, 5).map(f => getFactorLabel(f.name)).join('、') || '无';
+
+    document.getElementById('ai-summary').innerHTML = `
+        <div class="row">
+            <div class="col-md-6">
+                <h6 class="text-muted">🧠 模型概况</h6>
+                <ul class="small">
+                    <li>使用 <strong>XGBoost</strong> 分类器，${m.n_estimators} 棵树，深度 ${m.max_depth}</li>
+                    <li>训练集 <strong>${m.train_samples}</strong> 样本，${m.n_features} 个因子</li>
+                    <li>训练准确率 <strong class="green">${m.train_accuracy}%</strong>，验证准确率 <strong class="blue">${m.val_accuracy}%</strong></li>
+                    <li>正样本（上涨）占比 <strong>${m.positive_ratio}%</strong></li>
+                </ul>
+            </div>
+            <div class="col-md-6">
+                <h6 class="text-muted">📊 信号解读</h6>
+                <ul class="small">
+                    <li>买入概率 <strong class="${p.buy_probability >= 60 ? 'green' : p.buy_probability <= 40 ? 'red' : ''}">${p.buy_probability}%</strong>（阈值 ${p.threshold_buy}%）</li>
+                    <li>当前信号: <strong class="${s.action === 'buy' ? 'green' : s.action === 'sell' ? 'red' : ''}">${s.text}</strong>（置信度 ${s.confidence}%）</li>
+                    <li>市场处于 <strong>${reg.text}</strong> 阶段，20日波动率 ${reg.volatility}%</li>
+                    <li>最重要的因子: ${topFactors}</li>
+                </ul>
+            </div>
+        </div>
+        <hr style="border-color:var(--border)">
+        <div class="small text-muted">
+            ⚠️ 免责声明：AI 分析仅供参考，不构成投资建议。加密货币交易有极高风险，请谨慎决策。
+        </div>
+    `;
+}
+
+// 自动刷新
+document.getElementById('ai-auto-refresh').onchange = function() {
+    if (this.checked) {
+        autoRefreshTimer = setInterval(runAnalysis, 60000); // 每分钟刷新
+        toast('已开启自动刷新 (每60秒)', 'info');
+    } else {
+        clearInterval(autoRefreshTimer);
+        toast('已关闭自动刷新', 'info');
+    }
+};
+</script>
+{% endblock %}
