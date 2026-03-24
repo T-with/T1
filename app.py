@@ -367,23 +367,22 @@ def api_kline(symbol):
 
 @app.route('/api/ai/analyze', methods=['POST'])
 def api_ai_analyze():
-    """AI 多因子分析 — 返回完整报告"""
+    """AI 多因子分析 — 自动使用公共 API 获取数据"""
     data = request.json or {}
     try:
         symbol = data.get('symbol', 'BTC/USDT')
         timeframe = data.get('timeframe', '1h')
         params = data.get('params', {})
 
-        exchange_cfg = load_exchange()
-        client = ExchangeClient(exchange_cfg.get('exchange_id', 'binance'))
+        # 始终用 Binance 公共 API
+        client = ExchangeClient('binance')
 
-        # 获取足够的 K 线数据
         train_window = params.get('train_window', 500)
         limit = train_window + 100
         df = client.fetch_ohlcv(symbol, timeframe, limit=limit)
 
         if df.empty:
-            return jsonify({'error': '无法获取数据'}), 400
+            return jsonify({'error': '无法获取数据，请检查网络连接', 'status': 'error'}), 400
 
         result = AIMultiFactorStrategy.analyze(df, params)
         return jsonify(result)
@@ -395,21 +394,21 @@ def api_ai_analyze():
 
 @app.route('/api/agents/debate', methods=['POST'])
 def api_agents_debate():
-    """多 Agent 协作投票分析"""
+    """多 Agent 协作投票分析 — 自动使用公共 API 获取数据"""
     data = request.json or {}
     try:
         symbol = data.get('symbol', 'BTC/USDT')
         timeframe = data.get('timeframe', '1h')
         params = data.get('params', {})
 
-        exchange_cfg = load_exchange()
-        client = ExchangeClient(exchange_cfg.get('exchange_id', 'binance'))
+        # 始终用 Binance 公共 API 获取 K 线（不需要 API Key）
+        client = ExchangeClient('binance')
 
         limit = max(params.get('train_window', 500) + 100, 600)
         df = client.fetch_ohlcv(symbol, timeframe, limit=limit)
 
         if df.empty:
-            return jsonify({'error': '无法获取数据'}), 400
+            return jsonify({'error': '无法获取数据，请检查网络连接', 'status': 'error'}), 400
 
         result = orchestrator.run_debate(df, symbol, params)
         return jsonify(result)
@@ -417,6 +416,28 @@ def api_agents_debate():
     except Exception as e:
         logger.error(f"Agents debate error: {e}", exc_info=True)
         return jsonify({'error': str(e), 'status': 'error'}), 500
+
+
+@app.route('/api/agents/status', methods=['GET'])
+def api_agents_status():
+    """检查 Agent 系统状态"""
+    from engine.agents import orchestrator
+    status = {
+        'agents': [{'name': a.name, 'icon': a.icon, 'weight': a.vote_weight} for a in orchestrator.agents],
+        'total_agents': len(orchestrator.agents),
+        'status': 'ready',
+    }
+    # 测试 Binance 公共 API 连通性
+    try:
+        client = ExchangeClient('binance')
+        df = client.fetch_ohlcv('BTC/USDT', '1h', limit=2)
+        status['exchange_connected'] = not df.empty
+        status['latest_price'] = float(df.iloc[-1]['close']) if not df.empty else None
+    except Exception as e:
+        status['exchange_connected'] = False
+        status['exchange_error'] = str(e)
+
+    return jsonify(status)
 
 
 # ================================================================

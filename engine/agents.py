@@ -214,9 +214,14 @@ class NewsSentimentAgent(BaseAgent):
     }
 
     def _fetch_news(self, symbol: str) -> List[Dict]:
-        """从多个来源抓取加密货币新闻"""
+        """从多个来源抓取加密货币新闻（带超时和容错）"""
         import urllib.request
         import urllib.error
+        import socket
+
+        # 全局超时设置
+        original_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(8)
 
         coin = symbol.split('/')[0] if '/' in symbol else symbol
         news_items = []
@@ -225,7 +230,7 @@ class NewsSentimentAgent(BaseAgent):
         try:
             url = f"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories={coin}"
             req = urllib.request.Request(url, headers={'User-Agent': 'TradingPlatform/1.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
                 for item in data.get('Data', [])[:20]:
                     news_items.append({
@@ -242,7 +247,7 @@ class NewsSentimentAgent(BaseAgent):
         try:
             url = f"https://api.coingecko.com/api/v3/coins/{coin.lower()}/status_updates"
             req = urllib.request.Request(url, headers={'User-Agent': 'TradingPlatform/1.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
                 for item in data.get('status_updates', [])[:10]:
                     news_items.append({
@@ -254,6 +259,12 @@ class NewsSentimentAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"CoinGecko status fetch failed: {e}")
 
+        # 来源 3: 兜底 - 使用 K 线数据做简单新闻替代分析
+        if not news_items:
+            logger.info("No news from external APIs, using market data sentiment proxy")
+            news_items = []  # 返回空，在 analyze 里处理
+
+        socket.setdefaulttimeout(original_timeout)
         return news_items
 
     def _sentiment_score(self, text: str) -> float:
@@ -270,16 +281,12 @@ class NewsSentimentAgent(BaseAgent):
         try:
             news = self._fetch_news(symbol)
         except Exception as e:
-            return AgentOpinion(
-                self.name, self.icon, 'hold', 0, self.vote_weight,
-                f'新闻抓取失败: {e}',
-            )
+            logger.warning(f"News fetch failed, using market proxy: {e}")
+            news = []
 
+        # 如果外部新闻不可用，用市场数据做情绪代理
         if not news:
-            return AgentOpinion(
-                self.name, self.icon, 'hold', 30, self.vote_weight,
-                '未获取到相关新闻',
-            )
+            return self._market_sentiment_proxy(df)
 
         # 每条新闻打分
         scores = []
@@ -289,7 +296,6 @@ class NewsSentimentAgent(BaseAgent):
             scores.append(score)
 
         avg_score = np.mean(scores)
-        # 归一化到 -100 ~ 100
         sentiment_pct = round(avg_score * 100, 1)
 
         positive_count = sum(1 for s in scores if s > 0)
@@ -305,7 +311,6 @@ class NewsSentimentAgent(BaseAgent):
 
         confidence = min(abs(sentiment_pct), 100)
 
-        # 关键词统计
         all_text = ' '.join(f"{n['title']} {n.get('body','')}" for n in news).lower()
         hot_words = []
         for w in self.POSITIVE_WORDS | self.NEGATIVE_WORDS:
@@ -327,6 +332,97 @@ class NewsSentimentAgent(BaseAgent):
                 'sentiment_score': sentiment_pct,
                 'hot_words': hot_words[:8],
                 'top_headlines': [n['title'][:60] for n in news[:5]],
+                'source': 'external_apis',
+            },
+        )
+
+    def _market_sentiment_proxy(self, df: pd.DataFrame) -> AgentOpinion:
+        """外部新闻不可用时，用市场数据做情绪代理"""
+        n = len(df)
+        if n < 20:
+            return AgentOpinion(
+                self.name, self.icon, 'hold', 30, self.vote_weight,
+                '新闻源不可用，市场数据不足做情绪代理',
+                details={'source': 'unavailable'},
+            )
+
+        close = df['close']
+        scores = []
+        reasons = []
+
+        # 价格动量作为情绪指标
+        mom_5 = (close.iloc[-1] / close.iloc[-6] - 1) * 100
+        mom_20 = (close.iloc[-1] / close.iloc[-21] - 1) * 100
+
+        if mom_5 > 3:
+            scores.append(0.4)
+            reasons.append(f'5日涨幅 {mom_5:.1f}%（市场情绪偏乐观）')
+        elif mom_5 < -3:
+            scores.append(-0.4)
+            reasons.append(f'5日跌幅 {mom_5:.1f}%（市场情绪偏悲观）')
+
+        # 成交量异常作为情绪放大器
+        vol = df['volume']
+        vol_mean = vol.rolling(20).mean().iloc[-1]
+        vol_now = vol.iloc[-1]
+        vol_ratio = vol_now / vol_mean if vol_mean > 0 else 1
+
+        if vol_ratio > 2:
+            # 放量跟随趋势方向
+            if mom_5 > 0:
+                scores.append(0.3)
+                reasons.append(f'放量上涨 (量比{vol_ratio:.1f}x)，情绪积极')
+            else:
+                scores.append(-0.3)
+                reasons.append(f'放量下跌 (量比{vol_ratio:.1f}x)，情绪恐慌')
+
+        # 连续涨跌天数
+        ret = close.pct_change().tail(10)
+        consecutive_up = 0
+        consecutive_down = 0
+        for r in reversed(ret):
+            if r > 0:
+                consecutive_up += 1
+                consecutive_down = 0
+            elif r < 0:
+                consecutive_down += 1
+                consecutive_up = 0
+            else:
+                break
+
+        if consecutive_up >= 4:
+            scores.append(-0.2)
+            reasons.append(f'连续 {consecutive_up} 天上涨，追涨风险')
+        elif consecutive_down >= 4:
+            scores.append(0.2)
+            reasons.append(f'连续 {consecutive_down} 天下跌，可能超跌')
+
+        if not scores:
+            scores.append(0)
+            reasons.append('新闻源不可用，市场数据情绪信号中性')
+
+        total = sum(scores) / len(scores)
+        if total > 0.15:
+            action = 'buy'
+        elif total < -0.15:
+            action = 'sell'
+        else:
+            action = 'hold'
+
+        confidence = min(abs(total * 100), 80)  # 代理模式最高 80%
+
+        return AgentOpinion(
+            agent_name=self.name, agent_icon=self.icon,
+            action=action, confidence=confidence,
+            weight=self.vote_weight * 0.8,  # 代理模式降低权重
+            reasoning='[代理模式] ' + ' | '.join(reasons),
+            details={
+                'source': 'market_proxy',
+                'mom_5d': round(mom_5, 2),
+                'mom_20d': round(mom_20, 2),
+                'vol_ratio': round(vol_ratio, 2),
+                'consecutive_up': consecutive_up,
+                'consecutive_down': consecutive_down,
             },
         )
 

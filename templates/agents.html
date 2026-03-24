@@ -186,28 +186,60 @@ const actionClass = { buy: 'green', sell: 'red', hold: 'text-muted' };
 const actionIcon = { buy: '⬆️', sell: '⬇️', hold: '⏸️' };
 const actionText = { buy: '买入', sell: '卖出', hold: '观望' };
 
+// 页面加载时检查状态
+(async function checkStatus() {
+    try {
+        const s = await API.get('/api/agents/status');
+        if (s.exchange_connected) {
+            toast(`✅ 系统就绪 · BTC 价格 $${s.latest_price?.toLocaleString()}`, 'success');
+        } else {
+            toast(`⚠️ 交易所连接异常: ${s.exchange_error || '未知错误'}`, 'warning');
+        }
+    } catch (e) {
+        toast('⚠️ 状态检查失败，请确认服务正常运行', 'warning');
+    }
+})();
+
 async function runDebate() {
     const btn = document.getElementById('ag-run-btn');
+    const symbol = document.getElementById('ag-symbol').value;
+
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Agent 团队分析中...';
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 正在拉取 K 线数据...';
 
     // 重置状态
     document.querySelectorAll('[id^="status-"]').forEach(el => {
         el.className = 'agent-status-badge bg-warning text-dark';
-        el.innerHTML = '<span class="pulse-dot bg-warning"></span> 分析中';
+        el.innerHTML = '<span class="pulse-dot bg-warning"></span> 等待中';
     });
 
     try {
+        // 第一步：获取数据
         const data = {
-            symbol: document.getElementById('ag-symbol').value,
+            symbol,
             timeframe: document.getElementById('ag-timeframe').value,
             params: { train_window: 500 },
         };
 
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 5 个 Agent 分析中...';
+        document.querySelectorAll('[id^="status-"]').forEach(el => {
+            el.className = 'agent-status-badge bg-info';
+            el.innerHTML = '<span class="pulse-dot bg-info"></span> 分析中';
+        });
+
         const r = await API.post('/api/agents/debate', data);
 
-        if (r.error || r.status !== 'ok') {
-            toast(r.error || '分析失败', 'danger');
+        if (r.error) {
+            toast(`❌ ${r.error}`, 'danger');
+            document.querySelectorAll('[id^="status-"]').forEach(el => {
+                el.className = 'agent-status-badge bg-danger';
+                el.textContent = '❌ 失败';
+            });
+            return;
+        }
+
+        if (r.status !== 'ok') {
+            toast(`⚠️ 分析异常: ${r.status}`, 'warning');
             return;
         }
 
@@ -221,8 +253,17 @@ async function runDebate() {
         renderNewsDetail(r.agents);
         renderVoteChart(r.final_decision.vote_breakdown);
 
+        // 显示错误信息
+        if (r.errors?.length) {
+            toast(`⚠️ 部分 Agent 异常: ${r.errors.join('; ')}`, 'warning');
+        }
+
     } catch (e) {
-        toast('分析失败: ' + e.message, 'danger');
+        toast(`❌ 分析失败: ${e.message}\n请检查 Docker 网络是否能访问外部 API`, 'danger');
+        document.querySelectorAll('[id^="status-"]').forEach(el => {
+            el.className = 'agent-status-badge bg-danger';
+            el.textContent = '❌ 失败';
+        });
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-people"></i> 启动分析';
