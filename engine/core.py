@@ -263,7 +263,6 @@ class StrategyEngine:
         'rsi_reversal': 'RSI 超买超卖',
         'bollinger_breakout': '布林带突破',
         'dual_ma': '双均线交叉',
-        'grid': '网格交易',
         'ai_multi_factor': 'AI 多因子 (XGBoost)',
     }
 
@@ -1266,7 +1265,9 @@ class LiveTrader:
                 client = ExchangeClient(
                     config.exchange_id, config.api_key, config.api_secret, config.passphrase
                 )
-                df = client.fetch_ohlcv(config.symbol, config.timeframe, limit=200)
+                # 根据策略类型决定所需 K 线数量
+                min_bars = 600 if config.type == 'ai_multi_factor' else 200
+                df = client.fetch_ohlcv(config.symbol, config.timeframe, limit=min_bars)
                 if df.empty:
                     stop_event.wait(interval)
                     continue
