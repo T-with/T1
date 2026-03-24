@@ -3,8 +3,10 @@
 ## 目录
 
 - [环境要求](#环境要求)
-- [快速部署（Docker）](#快速部署docker)
-- [手动部署](#手动部署)
+- [快速部署](#快速部署)
+  - [方式一：Docker（Linux 服务器）](#方式一docker-部署推荐linux-服务器)
+  - [方式二：Windows 本地](#方式二windows-本地部署)
+  - [方式三：Linux 手动（无 Docker）](#方式三linux-手动部署无-docker)
 - [配置说明](#配置说明)
 - [安全加固](#安全加固)
 - [运维管理](#运维管理)
@@ -14,7 +16,7 @@
 
 ## 环境要求
 
-### Docker 部署（推荐）
+### Docker 部署（推荐，Linux 服务器）
 
 | 项目 | 最低要求 |
 |------|---------|
@@ -25,7 +27,16 @@
 | Docker | 20.10+ |
 | Docker Compose | 2.0+ |
 
-### 手动部署
+### Windows 本地部署
+
+| 项目 | 最低要求 |
+|------|---------|
+| 系统 | Windows 10+ |
+| Python | 3.10+（[下载](https://www.python.org/downloads/)，安装时勾选 Add to PATH） |
+| Git | [下载](https://git-scm.com/download/win) |
+| Docker | 可选：[Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+
+### Linux 手动部署
 
 | 项目 | 最低要求 |
 |------|---------|
@@ -34,7 +45,13 @@
 
 ---
 
-## 快速部署（Docker）
+## 快速部署
+
+> 以下命令根据你的系统选择。Linux/macOS 用终端 bash，Windows 用 PowerShell。
+
+---
+
+### 方式一：Docker 部署（推荐，Linux 服务器）
 
 ### 1. 安装 Docker
 
@@ -105,7 +122,68 @@ http://你的服务器IP:8080
 
 ---
 
-## 手动部署
+### 方式二：Windows 本地部署
+
+#### 1. 克隆代码
+
+```powershell
+# 打开 PowerShell
+git clone https://github.com/T-with/T1.git
+cd T1
+```
+
+#### 2. 配置凭据
+
+```powershell
+# 创建 .env 文件
+@"
+ADMIN_USER=admin
+ADMIN_PASS=你的强密码
+"@ | Out-File -Encoding utf8 .env
+```
+
+或者手动：打开 `T1` 文件夹，新建一个叫 `.env` 的文件（注意前面有个点），写入：
+
+```
+ADMIN_USER=admin
+ADMIN_PASS=你的强密码
+```
+
+#### 3. 安装 Python 依赖
+
+```powershell
+pip install flask ccxt pandas numpy gunicorn cryptography
+```
+
+#### 4. 设置环境变量并启动
+
+```powershell
+$env:ADMIN_USER = "admin"
+$env:ADMIN_PASS = "你的强密码"
+
+python app.py
+```
+
+看到类似 `Running on http://0.0.0.0:8080` 就启动成功了。
+
+#### 5. 访问平台
+
+浏览器打开 `http://localhost:8080`，输入你的用户名密码。
+
+#### 6.（可选）用 Docker Desktop
+
+如果想用 Docker 方式管理：
+
+1. 下载安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+2. 启动 Docker Desktop 后，在 PowerShell 中：
+
+```powershell
+docker compose up -d --build
+```
+
+---
+
+### 方式三：Linux 手动部署（无 Docker）
 
 适用于不想用 Docker 的场景。
 
