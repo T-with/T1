@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}策略管理 — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <div class="col-md-5">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-plus-lg"></i> 创建策略</h6></div>
+            <div class="card-body">
+                <form id="strategy-form">
+                    <div class="mb-3">
+                        <label class="form-label">策略名称</label>
+                        <input type="text" class="form-control" id="s-name" value="MyStrategy-1" required>
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label">交易对</label>
+                            <select class="form-select" id="s-symbol">
+                                <option value="BTC/USDT">BTC/USDT</option>
+                                <option value="ETH/USDT">ETH/USDT</option>
+                                <option value="SOL/USDT">SOL/USDT</option>
+                                <option value="BNB/USDT">BNB/USDT</option>
+                                <option value="XRP/USDT">XRP/USDT</option>
+                            </select>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label">K线周期</label>
+                            <select class="form-select" id="s-timeframe">
+                                <option value="15m">15 分钟</option>
+                                <option value="30m">30 分钟</option>
+                                <option value="1h" selected>1 小时</option>
+                                <option value="4h">4 小时</option>
+                                <option value="1d">1 天</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">策略类型</label>
+                        <select class="form-select" id="s-type">
+                            <option value="macd_cross">MACD 金叉/死叉</option>
+                            <option value="rsi_reversal">RSI 超买超卖</option>
+                            <option value="bollinger_breakout">布林带突破</option>
+                            <option value="dual_ma">双均线交叉</option>
+                        </select>
+                    </div>
+                    <div class="row">
+                        <div class="col-4 mb-3">
+                            <label class="form-label">初始资金 (USDT)</label>
+                            <input type="number" class="form-control" id="s-capital" value="10000">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">杠杆</label>
+                            <input type="number" class="form-control" id="s-leverage" value="1" min="1" max="125">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">仓位 %</label>
+                            <input type="number" class="form-control" id="s-position" value="10" min="1" max="100">
+                        </div>
+                    </div>
+                    <hr style="border-color:var(--border)">
+                    <div class="row">
+                        <div class="col-4 mb-3">
+                            <label class="form-label">止损 %</label>
+                            <input type="number" class="form-control" id="s-sl" value="3" step="0.5">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">止盈 %</label>
+                            <input type="number" class="form-control" id="s-tp" value="6" step="0.5">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">追踪止损 %</label>
+                            <input type="number" class="form-control" id="s-trail" value="2" step="0.5">
+                        </div>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="s-trailing" checked>
+                        <label class="form-check-label">启用追踪止损</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-trade w-100">
+                        <i class="bi bi-plus-circle"></i> 创建策略
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-7">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-list"></i> 已有策略</h6></div>
+            <div class="card-body p-0">
+                <table class="table table-hover mb-0">
+                    <thead><tr><th>名称</th><th>类型</th><th>交易对</th><th>周期</th><th>资金</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody id="strategy-list">
+                        <tr><td colspan="7" class="loading">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const typeNames = {
+    macd_cross: 'MACD 金叉/死叉',
+    rsi_reversal: 'RSI 超买超卖',
+    bollinger_breakout: '布林带突破',
+    dual_ma: '双均线交叉',
+    grid: '网格交易',
+};
+
+async function loadStrategies() {
+    const data = await API.get('/api/strategies');
+    const tbody = document.getElementById('strategy-list');
+    const entries = Object.entries(data);
+
+    if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">暂无策略</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = entries.map(([sid, s]) => `
+        <tr>
+            <td><strong>${s.name}</strong></td>
+            <td>${typeNames[s.type] || s.type}</td>
+            <td>${s.symbol}</td>
+            <td>${s.timeframe}</td>
+            <td>${fmt(s.capital)}</td>
+            <td><span class="badge ${s.status==='running'?'badge-running':'badge-stopped'}">${s.status==='running'?'运行中':'已停止'}</span></td>
+            <td>
+                <button class="btn btn-sm ${s.status==='running'?'btn-outline-danger':'btn-outline-success'}"
+                    onclick="toggleStrategy('${sid}', '${s.status}')">
+                    ${s.status==='running'?'停止':'启动'}
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="deleteStrategy('${sid}')">删除</button>
+            </td>
+        </tr>`).join('');
+}
+
+async function toggleStrategy(sid, currentStatus) {
+    if (currentStatus === 'running') {
+        await API.post(`/api/live/stop/${sid}`);
+        toast('策略已停止', 'warning');
+    } else {
+        const r = await API.post(`/api/live/start/${sid}`);
+        if (r.ok) toast('策略已启动', 'success');
+        else toast(r.error || '启动失败', 'danger');
+    }
+    loadStrategies();
+}
+
+async function deleteStrategy(sid) {
+    if (!confirm('确定删除？')) return;
+    await API.del(`/api/strategies/${sid}`);
+    toast('已删除', 'warning');
+    loadStrategies();
+}
+
+document.getElementById('strategy-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const data = {
+        name: document.getElementById('s-name').value,
+        symbol: document.getElementById('s-symbol').value,
+        timeframe: document.getElementById('s-timeframe').value,
+        type: document.getElementById('s-type').value,
+        capital: document.getElementById('s-capital').value,
+        leverage: document.getElementById('s-leverage').value,
+        position_size_pct: document.getElementById('s-position').value,
+        stop_loss_pct: document.getElementById('s-sl').value,
+        take_profit_pct: document.getElementById('s-tp').value,
+        trailing_stop: document.getElementById('s-trailing').checked,
+        trailing_stop_pct: document.getElementById('s-trail').value,
+        paper: true,
+    };
+    const r = await API.post('/api/strategies', data);
+    if (r.ok) {
+        toast(`策略创建成功 (ID: ${r.id})`, 'success');
+        loadStrategies();
+    } else {
+        toast('创建失败', 'danger');
+    }
+};
+
+loadStrategies();
+</script>
+{% endblock %}

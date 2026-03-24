@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-value green" id="total-equity">--</div>
+            <div class="stat-label">总权益 (USDT)</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-value" id="daily-pnl">--</div>
+            <div class="stat-label">今日盈亏</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-value blue" id="active-strategies">0</div>
+            <div class="stat-label">运行中策略</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-value" id="open-positions">0</div>
+            <div class="stat-label">持仓数</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0"><i class="bi bi-broadcast"></i> 实盘策略状态</h6>
+                <a href="/live" class="btn btn-sm btn-outline-primary">查看全部</a>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th>策略</th>
+                            <th>交易对</th>
+                            <th>方向</th>
+                            <th>入场价</th>
+                            <th>当前价</th>
+                            <th>盈亏</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="strategies-table">
+                        <tr><td colspan="7" class="loading">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h6 class="mb-0"><i class="bi bi-lightning"></i> 快速操作</h6>
+            </div>
+            <div class="card-body">
+                <a href="/strategy" class="btn btn-primary w-100 mb-2">
+                    <i class="bi bi-plus-lg"></i> 创建策略
+                </a>
+                <a href="/backtest" class="btn btn-outline-primary w-100 mb-2">
+                    <i class="bi bi-clock-history"></i> 运行回测
+                </a>
+                <a href="/settings" class="btn btn-outline-secondary w-100">
+                    <i class="bi bi-gear"></i> 配置交易所
+                </a>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0"><i class="bi bi-journal-text"></i> 最近交易</h6>
+            </div>
+            <div class="card-body p-0" style="max-height:300px;overflow-y:auto;">
+                <div id="recent-trades" class="list-group list-group-flush">
+                    <div class="loading">暂无交易记录</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadDashboard() {
+    try {
+        const strategies = await API.get('/api/strategies');
+        const entries = Object.entries(strategies);
+
+        // 统计
+        let totalEquity = 0, runningCount = 0, posCount = 0, allTrades = [];
+        const tbody = document.getElementById('strategies-table');
+        tbody.innerHTML = '';
+
+        if (entries.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">暂无策略，<a href="/strategy">创建一个</a></td></tr>';
+        }
+
+        for (const [sid, s] of entries) {
+            const ls = s.live_status || {};
+            const positions = ls.positions || {};
+            const pos = positions[s.symbol];
+            const isRunning = s.status === 'running';
+
+            if (isRunning) runningCount++;
+            posCount += Object.keys(positions).length;
+            totalEquity += ls.equity || s.capital;
+
+            if (ls.trades) {
+                for (const t of ls.trades.slice(-5)) {
+                    allTrades.push({ ...t, strategy: s.name, symbol: s.symbol });
+                }
+            }
+
+            const pnl = pos ? pos.pnl_pct || 0 : 0;
+            tbody.innerHTML += `
+                <tr>
+                    <td><strong>${s.name}</strong></td>
+                    <td>${s.symbol}</td>
+                    <td>${pos ? (pos.side === 'long' ? '<span class="green">做多</span>' : '<span class="red">做空</span>') : '-'}</td>
+                    <td>${pos ? fmt(pos.entry_price) : '-'}</td>
+                    <td>${pos ? fmt(pos.current_price) : '-'}</td>
+                    <td class="${pnlClass(pnl)}">${pos ? pnlSign(pnl) + '%' : '-'}</td>
+                    <td><span class="badge ${isRunning ? 'badge-running' : 'badge-stopped'}">${isRunning ? '运行中' : '已停止'}</span></td>
+                </tr>`;
+        }
+
+        document.getElementById('total-equity').textContent = fmt(totalEquity);
+        document.getElementById('active-strategies').textContent = runningCount;
+        document.getElementById('open-positions').textContent = posCount;
+
+        // 最近交易
+        const tradesEl = document.getElementById('recent-trades');
+        if (allTrades.length > 0) {
+            tradesEl.innerHTML = allTrades.slice(-10).reverse().map(t => `
+                <div class="list-group-item bg-transparent border-0 py-2">
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">${t.strategy} · ${t.symbol}</small>
+                        <small class="text-muted">${(t.time || '').slice(11, 19)}</small>
+                    </div>
+                    <div>
+                        <span class="${t.type?.includes('open') || t.type?.includes('buy') ? 'green' : 'red'}">${t.type}</span>
+                        @ ${fmt(t.price)}
+                        ${t.pnl !== undefined ? `<span class="${pnlClass(t.pnl)} float-end">${pnlSign(t.pnl)}</span>` : ''}
+                    </div>
+                </div>`).join('');
+        }
+
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+loadDashboard();
+setInterval(loadDashboard, 10000);
+</script>
+{% endblock %}

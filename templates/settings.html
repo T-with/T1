@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}设置 — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-bank"></i> 交易所配置</h6></div>
+            <div class="card-body">
+                <form id="exchange-form">
+                    <div class="mb-3">
+                        <label class="form-label">交易所</label>
+                        <select class="form-select" id="ex-id">
+                            <option value="binance">Binance (币安)</option>
+                            <option value="okx">OKX</option>
+                            <option value="bybit">Bybit</option>
+                            <option value="bitget">Bitget</option>
+                            <option value="kucoin">KuCoin</option>
+                            <option value="gate">Gate.io</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">API Key</label>
+                        <input type="password" class="form-control" id="ex-key" placeholder="输入 API Key">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">API Secret</label>
+                        <input type="password" class="form-control" id="ex-secret" placeholder="输入 API Secret">
+                    </div>
+                    <div class="mb-3" id="passphrase-group" style="display:none;">
+                        <label class="form-label">Passphrase (OKX/Bitget)</label>
+                        <input type="password" class="form-control" id="ex-pass" placeholder="输入 Passphrase">
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary flex-fill">
+                            <i class="bi bi-save"></i> 保存配置
+                        </button>
+                        <button type="button" class="btn btn-outline-primary" onclick="testExchange()">
+                            <i class="bi bi-plug"></i> 测试连接
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-info-circle"></i> 系统信息</h6></div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr><td class="text-muted">平台</td><td>MyTradingPlatform v1.0</td></tr>
+                    <tr><td class="text-muted">引擎</td><td>CryptoQuantTrader Core</td></tr>
+                    <tr><td class="text-muted">交易所</td><td id="info-exchange">--</td></tr>
+                    <tr><td class="text-muted">状态</td><td><span class="badge badge-running">运行中</span></td></tr>
+                </table>
+                <hr style="border-color:var(--border)">
+                <h6 class="text-muted mb-2">安全提醒</h6>
+                <ul class="small text-muted">
+                    <li>API Key 仅存储在本地服务器</li>
+                    <li>建议只开启交易权限，不要开提现权限</li>
+                    <li>建议先用模拟盘测试策略</li>
+                    <li>加密货币交易有极高风险</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('ex-id').onchange = function() {
+    document.getElementById('passphrase-group').style.display =
+        ['okx','bitget'].includes(this.value) ? 'block' : 'none';
+};
+
+async function loadExchange() {
+    const data = await API.get('/api/exchange');
+    if (data.exchange_id) {
+        document.getElementById('ex-id').value = data.exchange_id;
+        document.getElementById('ex-key').value = data.api_key || '';
+        document.getElementById('ex-secret').value = data.api_secret || '';
+        document.getElementById('ex-pass').value = data.passphrase || '';
+        document.getElementById('info-exchange').textContent = data.exchange_id.toUpperCase();
+        document.getElementById('ex-id').dispatchEvent(new Event('change'));
+    }
+}
+
+document.getElementById('exchange-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const data = {
+        exchange_id: document.getElementById('ex-id').value,
+        api_key: document.getElementById('ex-key').value,
+        api_secret: document.getElementById('ex-secret').value,
+        passphrase: document.getElementById('ex-pass').value,
+    };
+    await API.post('/api/exchange', data);
+    document.getElementById('info-exchange').textContent = data.exchange_id.toUpperCase();
+    toast('配置已保存', 'success');
+};
+
+async function testExchange() {
+    const data = {
+        exchange_id: document.getElementById('ex-id').value,
+        api_key: document.getElementById('ex-key').value,
+        api_secret: document.getElementById('ex-secret').value,
+        passphrase: document.getElementById('ex-pass').value,
+    };
+    toast('正在测试连接...', 'info');
+    const r = await API.post('/api/exchange/test', data);
+    if (r.ok) toast(r.message, 'success');
+    else toast(r.message || '连接失败', 'danger');
+}
+
+loadExchange();
+</script>
+{% endblock %}

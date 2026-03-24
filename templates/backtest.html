@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}回测 — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-gear"></i> 回测参数</h6></div>
+            <div class="card-body">
+                <form id="bt-form">
+                    <div class="mb-3">
+                        <label class="form-label">策略</label>
+                        <select class="form-select" id="bt-strategy">
+                            <option value="macd_cross">MACD 金叉/死叉</option>
+                            <option value="rsi_reversal">RSI 超买超卖</option>
+                            <option value="bollinger_breakout">布林带突破</option>
+                            <option value="dual_ma">双均线交叉</option>
+                        </select>
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label">交易对</label>
+                            <select class="form-select" id="bt-symbol">
+                                <option value="BTC/USDT">BTC/USDT</option>
+                                <option value="ETH/USDT">ETH/USDT</option>
+                                <option value="SOL/USDT">SOL/USDT</option>
+                            </select>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label">周期</label>
+                            <select class="form-select" id="bt-timeframe">
+                                <option value="1h" selected>1H</option>
+                                <option value="4h">4H</option>
+                                <option value="1d">1D</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label">开始日期</label>
+                            <input type="date" class="form-control" id="bt-start" value="2024-01-01">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label">结束日期</label>
+                            <input type="date" class="form-control" id="bt-end" value="2025-01-01">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-4 mb-3">
+                            <label class="form-label">资金</label>
+                            <input type="number" class="form-control" id="bt-capital" value="10000">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">杠杆</label>
+                            <input type="number" class="form-control" id="bt-leverage" value="1" min="1">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">仓位 %</label>
+                            <input type="number" class="form-control" id="bt-position" value="10">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-4 mb-3">
+                            <label class="form-label">止损 %</label>
+                            <input type="number" class="form-control" id="bt-sl" value="3" step="0.5">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">止盈 %</label>
+                            <input type="number" class="form-control" id="bt-tp" value="6" step="0.5">
+                        </div>
+                        <div class="col-4 mb-3">
+                            <label class="form-label">手续费 %</label>
+                            <input type="number" class="form-control" id="bt-fee" value="0.04" step="0.01">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-trade w-100" id="bt-btn">
+                        <i class="bi bi-play-fill"></i> 开始回测
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-8">
+        <div class="card mb-3" id="bt-result-card" style="display:none;">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-bar-chart"></i> 回测结果</h6></div>
+            <div class="card-body">
+                <div class="row g-3 mb-3" id="bt-stats"></div>
+                <canvas id="equity-chart" height="200"></canvas>
+            </div>
+        </div>
+        <div class="card" id="bt-trades-card" style="display:none;">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-list-ol"></i> 交易记录</h6></div>
+            <div class="card-body p-0" style="max-height:400px;overflow-y:auto;">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>#</th><th>方向</th><th>入场价</th><th>出场价</th><th>盈亏</th><th>原因</th></tr></thead>
+                    <tbody id="bt-trades-body"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="card" id="bt-placeholder">
+            <div class="card-body text-center py-5">
+                <i class="bi bi-graph-up" style="font-size:3rem;color:var(--text-dim);"></i>
+                <p class="text-muted mt-3">配置参数后点击「开始回测」</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+let chart = null;
+
+document.getElementById('bt-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('bt-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 回测中...';
+
+    try {
+        const result = await API.post('/api/backtest', {
+            strategy_type: document.getElementById('bt-strategy').value,
+            symbol: document.getElementById('bt-symbol').value,
+            timeframe: document.getElementById('bt-timeframe').value,
+            start_date: document.getElementById('bt-start').value,
+            end_date: document.getElementById('bt-end').value,
+            capital: document.getElementById('bt-capital').value,
+            leverage: document.getElementById('bt-leverage').value,
+            position_size_pct: document.getElementById('bt-position').value,
+            stop_loss_pct: document.getElementById('bt-sl').value,
+            take_profit_pct: document.getElementById('bt-tp').value,
+            commission: document.getElementById('bt-fee').value / 100,
+        });
+
+        if (result.error) {
+            toast(result.error, 'danger');
+            return;
+        }
+
+        // 显示结果
+        document.getElementById('bt-placeholder').style.display = 'none';
+        document.getElementById('bt-result-card').style.display = 'block';
+        document.getElementById('bt-trades-card').style.display = 'block';
+
+        // 统计卡片
+        const ret = result.total_return_pct;
+        document.getElementById('bt-stats').innerHTML = `
+            <div class="col-3"><div class="card stat-card"><div class="stat-value ${pnlClass(ret)}">${pnlSign(ret)}%</div><div class="stat-label">总收益率</div></div></div>
+            <div class="col-3"><div class="card stat-card"><div class="stat-value">${result.total_trades}</div><div class="stat-label">交易次数</div></div></div>
+            <div class="col-3"><div class="card stat-card"><div class="stat-value green">${fmt(result.win_rate)}%</div><div class="stat-label">胜率</div></div></div>
+            <div class="col-3"><div class="card stat-card"><div class="stat-value red">${fmt(result.max_drawdown_pct)}%</div><div class="stat-label">最大回撤</div></div></div>`;
+
+        // 权益曲线
+        const eq = result.equity_curve;
+        if (chart) chart.destroy();
+        chart = new Chart(document.getElementById('equity-chart'), {
+            type: 'line',
+            data: {
+                labels: eq.map((_, i) => i),
+                datasets: [{
+                    label: '权益曲线',
+                    data: eq,
+                    borderColor: '#58a6ff',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    backgroundColor: 'rgba(88,166,255,0.1)',
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { display: false },
+                    y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
+                }
+            }
+        });
+
+        // 交易列表
+        document.getElementById('bt-trades-body').innerHTML = result.trades.map((t, i) => `
+            <tr>
+                <td>${i+1}</td>
+                <td class="${t.side==='long'?'green':'red'}">${t.side==='long'?'做多':'做空'}</td>
+                <td>${fmt(t.entry_price)}</td>
+                <td>${fmt(t.exit_price)}</td>
+                <td class="${pnlClass(t.pnl)}">${pnlSign(t.pnl)}</td>
+                <td><small class="text-muted">${t.reason}</small></td>
+            </tr>`).join('');
+
+    } catch (err) {
+        toast('回测失败: ' + err.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-fill"></i> 开始回测';
+    }
+};
+</script>
+{% endblock %}

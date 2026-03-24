@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}实盘交易 — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between">
+                <h6 class="mb-0"><i class="bi bi-broadcast"></i> 实盘交易控制台</h6>
+                <span class="text-muted" id="last-update">--</span>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th>策略名称</th>
+                            <th>交易对</th>
+                            <th>周期</th>
+                            <th>方向</th>
+                            <th>入场价</th>
+                            <th>当前价</th>
+                            <th>盈亏</th>
+                            <th>权益</th>
+                            <th>信号</th>
+                            <th>模式</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="live-table">
+                        <tr><td colspan="12" class="loading">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mt-2">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-lightning"></i> 当前持仓</h6></div>
+            <div class="card-body p-0" id="positions-panel">
+                <div class="text-center py-4 text-muted">暂无持仓</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-journal-text"></i> 交易日志</h6></div>
+            <div class="card-body p-0" style="max-height:350px;overflow-y:auto;" id="trade-log">
+                <div class="text-center py-4 text-muted">暂无日志</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadLive() {
+    try {
+        const strategies = await API.get('/api/strategies');
+        const entries = Object.entries(strategies);
+        const tbody = document.getElementById('live-table');
+        const posPanel = document.getElementById('positions-panel');
+        const logPanel = document.getElementById('trade-log');
+
+        let allPositions = [];
+        let allTrades = [];
+
+        if (entries.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="12" class="text-center py-4 text-muted">暂无策略，<a href="/strategy">创建一个</a></td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = entries.map(([sid, s]) => {
+            const ls = s.live_status || {};
+            const pos = (ls.positions || {})[s.symbol];
+            const pnl = pos ? (pos.pnl_pct || 0) : 0;
+            const isRunning = s.status === 'running';
+
+            if (pos) allPositions.push({ ...pos, strategy: s.name, symbol: s.symbol, sid });
+            if (ls.trades) {
+                for (const t of ls.trades.slice(-5).reverse()) {
+                    allTrades.push({ ...t, strategy: s.name });
+                }
+            }
+
+            return `<tr>
+                <td><strong>${s.name}</strong></td>
+                <td>${s.symbol}</td>
+                <td>${s.timeframe}</td>
+                <td>${pos ? (pos.side==='long'?'<span class="green">做多</span>':'<span class="red">做空</span>') : '-'}</td>
+                <td>${pos ? fmt(pos.entry_price) : '-'}</td>
+                <td>${pos ? fmt(pos.current_price) : '-'}</td>
+                <td class="${pnlClass(pnl)}">${pos ? pnlSign(pnl)+'%' : '-'}</td>
+                <td>${fmt(ls.equity || s.capital)}</td>
+                <td><code>${ls.last_signal || '-'}</code></td>
+                <td><span class="badge ${s.paper?'bg-warning text-dark':'bg-danger'}">${s.paper?'模拟':'实盘'}</span></td>
+                <td><span class="badge ${isRunning?'badge-running':'badge-stopped'}">${isRunning?'运行中':'已停止'}</span></td>
+                <td>
+                    <button class="btn btn-sm ${isRunning?'btn-outline-danger':'btn-outline-success'}"
+                        onclick="toggleLive('${sid}','${s.status}')">
+                        <i class="bi ${isRunning?'bi-stop-fill':'bi-play-fill'}"></i>
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+
+        // 持仓面板
+        if (allPositions.length > 0) {
+            posPanel.innerHTML = allPositions.map(p => `
+                <div class="card-body position-card ${p.side==='short'?'short':''} border-bottom" style="border-color:var(--border);">
+                    <div class="d-flex justify-content-between">
+                        <div>
+                            <strong>${p.strategy}</strong> · ${p.symbol}
+                            <span class="badge ${p.side==='long'?'bg-success':'bg-danger'} ms-2">${p.side==='long'?'做多':'做空'}</span>
+                        </div>
+                        <span class="${pnlClass(p.pnl_pct||0)} fw-bold">${pnlSign(p.pnl_pct||0)}%</span>
+                    </div>
+                    <small class="text-muted">入场: ${fmt(p.entry_price)} → 当前: ${fmt(p.current_price)}</small>
+                </div>`).join('');
+        } else {
+            posPanel.innerHTML = '<div class="text-center py-4 text-muted">暂无持仓</div>';
+        }
+
+        // 交易日志
+        if (allTrades.length > 0) {
+            logPanel.innerHTML = allTrades.slice(0, 20).map(t => `
+                <div class="px-3 py-2 border-bottom" style="border-color:var(--border);">
+                    <small class="text-muted">${(t.time||'').slice(11,19)}</small>
+                    <span class="ms-2 ${t.type?.includes('open')||t.type?.includes('buy')?'green':'red'}">${t.type}</span>
+                    @ <strong>${fmt(t.price)}</strong>
+                    ${t.pnl !== undefined ? `<span class="${pnlClass(t.pnl)} float-end">${pnlSign(t.pnl)}</span>` : ''}
+                </div>`).join('');
+        }
+
+        document.getElementById('last-update').textContent = '更新: ' + new Date().toLocaleTimeString();
+
+    } catch (e) { console.error(e); }
+}
+
+async function toggleLive(sid, status) {
+    if (status === 'running') {
+        await API.post(`/api/live/stop/${sid}`);
+        toast('策略已停止', 'warning');
+    } else {
+        const r = await API.post(`/api/live/start/${sid}`);
+        if (r.ok) toast('策略已启动 🚀', 'success');
+        else toast(r.error || '启动失败', 'danger');
+    }
+    loadLive();
+}
+
+loadLive();
+setInterval(loadLive, 8000);
+</script>
+{% endblock %}
