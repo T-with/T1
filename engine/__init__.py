@@ -28,3 +28,7 @@ from .models import (
     ModelManager, LSTMPredictor, TransformerPredictor,
     FeatureEngineer, model_manager
 )
+from .rl import (
+    PPOAgent, TradingEnvironment, RLStrategyManager,
+    rl_manager
+)

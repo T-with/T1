@@ -266,6 +266,7 @@ class StrategyEngine:
         'ai_multi_factor': 'AI 多因子 (XGBoost)',
         'lstm': 'LSTM 深度学习',
         'transformer': 'Transformer 注意力',
+        'rl_ppo': '强化学习 PPO',
     }
 
     @staticmethod
@@ -280,6 +281,8 @@ class StrategyEngine:
             return AIMultiFactorStrategy.generate_signals(df, params)
         elif strategy_type in ('lstm', 'transformer'):
             return StrategyEngine._dl_signal(df, strategy_type, params)
+        elif strategy_type == 'rl_ppo':
+            return StrategyEngine._rl_signal(df, params)
         elif strategy_type == 'macd_cross':
             return StrategyEngine._macd_cross(df, params)
         elif strategy_type == 'rsi_reversal':
@@ -379,6 +382,32 @@ class StrategyEngine:
                 })
         except Exception as e:
             logger.error(f"DL signal error ({model_type}): {e}")
+        return signals
+
+    @staticmethod
+    def _rl_signal(df, params):
+        """强化学习 PPO 信号生成"""
+        signals = []
+        try:
+            from engine.rl import rl_manager
+            result = rl_manager.predict(df, params.get('symbol', 'BTC/USDT'), params.get('timeframe', '1h'))
+            if result.get('status') != 'ok':
+                return signals
+            curr = df.iloc[-1]
+            if result['action'] == 1:  # buy
+                signals.append({
+                    'type': 'buy',
+                    'price': curr['close'],
+                    'confidence': result['probabilities']['buy'],
+                })
+            elif result['action'] == 2:  # sell
+                signals.append({
+                    'type': 'sell',
+                    'price': curr['close'],
+                    'confidence': result['probabilities']['sell'],
+                })
+        except Exception as e:
+            logger.error(f"RL signal error: {e}")
         return signals
 
 

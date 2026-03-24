@@ -25,6 +25,7 @@ from engine.execution import (
 from engine.risk import risk_manager, VolatilityEngine
 from engine.sentiment import sentiment_engine
 from engine.models import model_manager
+from engine.rl import rl_manager
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -861,7 +862,66 @@ def api_model_predict():
 @app.route('/api/models/list', methods=['GET'])
 def api_model_list():
     """列出所有已训练模型"""
-    return jsonify(model_manager.list_models())
+    models = model_manager.list_models()
+    rl_models = rl_manager.list_models()
+    return jsonify({'dl_models': models, 'rl_models': rl_models})
+
+
+# ================================================================
+# API: 强化学习
+# ================================================================
+
+@app.route('/api/rl/train', methods=['POST'])
+def api_rl_train():
+    """训练 RL PPO 交易代理"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        params = data.get('params', {})
+
+        client = ExchangeClient('binance')
+        limit = max(params.get('train_window', 1000), 500)
+        df = client.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+        if df.empty or len(df) < 200:
+            return jsonify({'error': f'Insufficient data: {len(df)} bars'}), 400
+
+        result = rl_manager.train(
+            df=df, symbol=symbol, timeframe=timeframe,
+            n_episodes=params.get('n_episodes', 100),
+            hidden_size=params.get('hidden_size', 128),
+            lr=params.get('lr', 3e-4),
+            commission=params.get('commission', 0.0004),
+            reward_type=params.get('reward_type', 'sharpe'),
+        )
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"RL train error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rl/predict', methods=['POST'])
+def api_rl_predict():
+    """使用 RL 代理预测"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+
+        client = ExchangeClient('binance')
+        df = client.fetch_ohlcv(symbol, timeframe, limit=200)
+
+        if df.empty:
+            return jsonify({'error': 'No data'}), 400
+
+        result = rl_manager.predict(df, symbol, timeframe)
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"RL predict error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 # ================================================================
