@@ -265,6 +265,7 @@ class StrategyEngine:
         'bollinger_breakout': '布林带突破',
         'dual_ma': '双均线交叉',
         'grid': '网格交易',
+        'ai_multi_factor': 'AI 多因子 (XGBoost)',
     }
 
     @staticmethod
@@ -275,7 +276,9 @@ class StrategyEngine:
 
         df = Indicators.add_all(df)
 
-        if strategy_type == 'macd_cross':
+        if strategy_type == 'ai_multi_factor':
+            return AIMultiFactorStrategy.generate_signals(df, params)
+        elif strategy_type == 'macd_cross':
             return StrategyEngine._macd_cross(df, params)
         elif strategy_type == 'rsi_reversal':
             return StrategyEngine._rsi_reversal(df, params)
@@ -349,6 +352,306 @@ class StrategyEngine:
         elif prev['ma_f'] >= prev['ma_s'] and curr['ma_f'] < curr['ma_s']:
             signals.append({'type': 'sell', 'price': curr['close'], 'confidence': 0.6})
         return signals
+
+
+# ================================================================
+# AI 多因子策略 — XGBoost 自动因子挖掘 + Walk-Forward
+# ================================================================
+
+class AIMultiFactorStrategy:
+    """
+    AI 多因子策略
+
+    核心逻辑：
+    1. 因子工程：从 OHLCV 自动生成 50+ 技术因子（动量/波动率/量价/趋势）
+    2. 标签：下一根 K 线收益 > 阈值 → 买入(1)，否则卖出(0)
+    3. 模型：XGBoost，walk-forward 滚动训练，避免未来数据泄露
+    4. 信号：模型预测买入概率 > 阈值 → 开仓，< 阈值 → 平仓
+
+    可调参数：
+    - train_window: 训练窗口大小（默认 500 根 K 线）
+    - retrain_interval: 每隔多少根 K 线重新训练（默认 50）
+    - buy_threshold: 买入概率阈值（默认 0.6）
+    - sell_threshold: 卖出概率阈值（默认 0.4）
+    - target_return: 目标收益率阈值，下一根收益 > 此值才算正样本（默认 0.002 = 0.2%）
+    - n_estimators: XGBoost 树数量（默认 100）
+    - max_depth: XGBoost 最大深度（默认 5）
+    """
+
+    # 缓存已训练的模型
+    _model_cache = {}
+
+    @staticmethod
+    def compute_factors(df: pd.DataFrame) -> pd.DataFrame:
+        """计算全部因子（特征工程）"""
+        f = df.copy()
+        close = f['close']
+        high = f['high']
+        low = f['low']
+        volume = f['volume']
+
+        # === 动量因子 ===
+        for p in [5, 10, 20, 60]:
+            f[f'mom_{p}'] = close / close.shift(p) - 1  # N期收益率
+
+        # === 波动率因子 ===
+        ret = close.pct_change()
+        for p in [5, 10, 20, 60]:
+            f[f'vol_{p}'] = ret.rolling(p).std()  # 滚动波动率
+        f['vol_ratio_5_20'] = f['vol_5'] / f['vol_20'].replace(0, np.nan)  # 短/长期波动比
+
+        # === 技术指标因子 ===
+        # RSI
+        f['rsi_14'] = Indicators.rsi(f, 14)
+        f['rsi_7'] = Indicators.rsi(f, 7)
+        f['rsi_21'] = Indicators.rsi(f, 21)
+        # MACD
+        macd_line, sig_line, hist = Indicators.macd(f)
+        f['macd_hist'] = hist
+        f['macd_hist_slope'] = hist - hist.shift(3)  # MACD柱状图斜率
+        # 布林带宽度
+        upper, mid, lower = Indicators.bollinger(f)
+        f['bb_width'] = (upper - lower) / mid
+        f['bb_position'] = (close - lower) / (upper - lower).replace(0, np.nan)  # 价格在BB中的位置
+        # ATR
+        f['atr'] = Indicators.atr(f)
+        f['atr_ratio'] = f['atr'] / close  # ATR/价格比
+
+        # === 趋势因子 ===
+        for p in [10, 20, 50]:
+            sma = close.rolling(p).mean()
+            ema = close.ewm(span=p, adjust=False).mean()
+            f[f'sma_dist_{p}'] = (close - sma) / sma  # 距SMA的距离
+            f[f'ema_dist_{p}'] = (close - ema) / ema  # 距EMA的距离
+
+        # === 量价因子 ===
+        vol_sma_20 = volume.rolling(20).mean()
+        f['vol_ratio'] = volume / vol_sma_20.replace(0, np.nan)  # 量比
+        f['price_vol_corr'] = ret.rolling(20).corr(volume.pct_change())  # 价量相关性
+        # OBV 斜率
+        obv = (np.sign(ret) * volume).cumsum()
+        f['obv_slope_10'] = (obv - obv.shift(10)) / 10
+
+        # === K线形态因子 ===
+        f['body_ratio'] = (close - f['open']).abs() / (high - low).replace(0, np.nan)  # 实体占比
+        f['upper_shadow'] = (high - close.clip(lower=f['open'])) / (high - low).replace(0, np.nan)
+        f['lower_shadow'] = (f['open'].clip(upper=close) - low) / (high - low).replace(0, np.nan)
+
+        # === 均值回归因子 ===
+        for p in [20, 60]:
+            sma = close.rolling(p).mean()
+            std = close.rolling(p).std()
+            f[f'zscore_{p}'] = (close - sma) / std.replace(0, np.nan)  # Z-score
+
+        # === 时间因子 ===
+        if hasattr(f.index, 'hour'):
+            f['hour_sin'] = np.sin(2 * np.pi * f.index.hour / 24)
+            f['hour_cos'] = np.cos(2 * np.pi * f.index.hour / 24)
+        if hasattr(f.index, 'dayofweek'):
+            f['dow_sin'] = np.sin(2 * np.pi * f.index.dayofweek / 7)
+            f['dow_cos'] = np.cos(2 * np.pi * f.index.dayofweek / 7)
+
+        return f
+
+    @staticmethod
+    def get_factor_columns(df: pd.DataFrame) -> list:
+        """获取所有因子列名"""
+        exclude = {'open', 'high', 'low', 'close', 'volume', 'timestamp'}
+        exclude.update(c for c in df.columns if c.startswith(('sma_', 'ema_', 'bb_', 'macd_')) and c not in ('macd_hist', 'macd_hist_slope'))
+        return [c for c in df.columns if c not in exclude and not c.startswith('_')]
+
+    @staticmethod
+    def _train_model(X_train, y_train, params):
+        """训练 XGBoost 模型"""
+        from xgboost import XGBClassifier
+
+        n_estimators = params.get('n_estimators', 100)
+        max_depth = params.get('max_depth', 5)
+        learning_rate = params.get('learning_rate', 0.1)
+
+        model = XGBClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            use_label_encoder=False,
+            eval_metric='logloss',
+            random_state=42,
+            n_jobs=1,
+        )
+        model.fit(X_train, y_train)
+        return model
+
+    @staticmethod
+    def generate_signals(df: pd.DataFrame, params: Dict) -> List[Dict]:
+        """Walk-Forward AI 多因子信号生成（实盘用）"""
+        try:
+            return AIMultiFactorStrategy._generate_impl(df, params)
+        except Exception as e:
+            logger.error(f"AI MultiFactor error: {e}", exc_info=True)
+            return []
+
+    @staticmethod
+    def _generate_impl(df: pd.DataFrame, params: Dict) -> List[Dict]:
+        train_window = params.get('train_window', 500)
+        buy_threshold = params.get('buy_threshold', 0.6)
+        sell_threshold = params.get('sell_threshold', 0.4)
+        target_return = params.get('target_return', 0.002)
+
+        if len(df) < train_window + 60:
+            return []
+
+        # 计算因子
+        fdf = AIMultiFactorStrategy.compute_factors(df)
+        factor_cols = AIMultiFactorStrategy.get_factor_columns(fdf)
+
+        # 构建训练数据：用前 train_window 根预测最新一根
+        train_df = fdf.iloc[-(train_window + 1):-1].copy()
+        train_df = train_df[factor_cols + ['close']].dropna()
+        if len(train_df) < 100:
+            return []
+
+        # 标签：下一根收益 > target_return → 1
+        train_df['target'] = (train_df['close'].shift(-1) / train_df['close'] - 1 > target_return).astype(int)
+        train_df = train_df.dropna(subset=['target'])
+
+        X_train = train_df[factor_cols].values
+        y_train = train_df['target'].values
+
+        if len(np.unique(y_train)) < 2:
+            return []
+
+        # 训练
+        model = AIMultiFactorStrategy._train_model(X_train, y_train, params)
+
+        # 预测最新一根
+        latest = fdf.iloc[[-1]][factor_cols].dropna(axis=1, how='all')
+        # 对齐列
+        for col in factor_cols:
+            if col not in latest.columns:
+                latest[col] = 0
+        latest = latest[factor_cols]
+
+        if latest.isna().all(axis=1).iloc[0]:
+            return []
+
+        # 填充 NaN 为 0（缺失因子）
+        latest = latest.fillna(0)
+        prob = model.predict_proba(latest.values)[0]
+        buy_prob = prob[1] if len(prob) > 1 else prob[0]
+        current_price = float(df.iloc[-1]['close'])
+
+        signals = []
+        if buy_prob >= buy_threshold:
+            signals.append({
+                'type': 'buy',
+                'price': current_price,
+                'confidence': round(float(buy_prob), 3),
+            })
+        elif buy_prob <= sell_threshold:
+            signals.append({
+                'type': 'sell',
+                'price': current_price,
+                'confidence': round(float(1 - buy_prob), 3),
+            })
+
+        return signals
+
+    @staticmethod
+    def vectorized_signals(df: pd.DataFrame, params: Dict) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        向量化信号生成（回测用）
+        Walk-Forward: 每隔 retrain_interval 根 K 线重新训练模型
+        """
+        from xgboost import XGBClassifier
+
+        train_window = params.get('train_window', 500)
+        retrain_interval = params.get('retrain_interval', 50)
+        buy_threshold = params.get('buy_threshold', 0.6)
+        sell_threshold = params.get('sell_threshold', 0.4)
+        target_return = params.get('target_return', 0.002)
+        n_estimators = params.get('n_estimators', 100)
+        max_depth = params.get('max_depth', 5)
+        learning_rate = params.get('learning_rate', 0.1)
+
+        n = len(df)
+        buy = np.zeros(n, dtype=bool)
+        sell = np.zeros(n, dtype=bool)
+
+        # 计算全部因子
+        fdf = AIMultiFactorStrategy.compute_factors(df)
+        factor_cols = AIMultiFactorStrategy.get_factor_columns(fdf)
+
+        # 构建标签（全部）
+        fdf['_target'] = (fdf['close'].shift(-1) / fdf['close'] - 1 > target_return).astype(int)
+
+        # 删除有 NaN 的行
+        valid_mask = fdf[factor_cols].notna().all(axis=1) & fdf['_target'].notna()
+        fdf_clean = fdf.loc[valid_mask].copy()
+
+        if len(fdf_clean) < train_window + 100:
+            return buy, sell
+
+        X_all = fdf_clean[factor_cols].values
+        y_all = fdf_clean['_target'].values.astype(int)
+        indices = fdf_clean.index
+
+        # Walk-Forward
+        model = None
+        last_train_end = -1
+
+        for i in range(train_window, len(fdf_clean)):
+            # 需要重新训练
+            if model is None or (i - last_train_end) >= retrain_interval:
+                train_start = max(0, i - train_window)
+                X_tr = X_all[train_start:i]
+                y_tr = y_all[train_start:i]
+
+                if len(np.unique(y_tr)) < 2:
+                    continue
+
+                model = XGBClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    learning_rate=learning_rate,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    use_label_encoder=False,
+                    eval_metric='logloss',
+                    random_state=42,
+                    n_jobs=1,
+                )
+                model.fit(X_tr, y_tr)
+                last_train_end = i
+
+            if model is None:
+                continue
+
+            # 预测当前点
+            x_cur = X_all[i].reshape(1, -1)
+            if np.isnan(x_cur).any():
+                continue
+
+            prob = model.predict_proba(x_cur)[0]
+            buy_prob = prob[1] if len(prob) > 1 else prob[0]
+
+            # 映射回原始 df 的索引
+            orig_idx = df.index.get_loc(indices[i])
+            if buy_prob >= buy_threshold:
+                buy[orig_idx] = True
+            elif buy_prob <= sell_threshold:
+                sell[orig_idx] = True
+
+        # 过滤前 train_window
+        buy[:train_window] = False
+        sell[:train_window] = False
+
+        return buy, sell
 
 
 # ================================================================
@@ -661,6 +964,10 @@ class BacktestEngine:
                 slow_ma = df['close'].rolling(slow_p).mean().values
             buy[1:] = (fast_ma[:-1] <= slow_ma[:-1]) & (fast_ma[1:] > slow_ma[1:])
             sell[1:] = (fast_ma[:-1] >= slow_ma[:-1]) & (fast_ma[1:] < slow_ma[1:])
+
+        elif strategy_type == 'ai_multi_factor':
+            # AI 多因子使用 walk-forward 向量化信号
+            return AIMultiFactorStrategy.vectorized_signals(df, params)
 
         buy[:50] = False
         sell[:50] = False

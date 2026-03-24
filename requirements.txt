@@ -4,3 +4,5 @@ pandas>=2.0
 numpy>=1.24
 gunicorn>=21.0
 cryptography>=42.0
+scikit-learn>=1.4
+xgboost>=2.0

@@ -37,11 +37,37 @@
                     <div class="mb-3">
                         <label class="form-label">策略类型</label>
                         <select class="form-select" id="s-type">
+                            <option value="ai_multi_factor">🧠 AI 多因子 (XGBoost) ⭐推荐</option>
                             <option value="macd_cross">MACD 金叉/死叉</option>
                             <option value="rsi_reversal">RSI 超买超卖</option>
                             <option value="bollinger_breakout">布林带突破</option>
                             <option value="dual_ma">双均线交叉</option>
                         </select>
+                    </div>
+                    <div class="mb-3" id="ai-params" style="border-left:3px solid var(--purple);padding-left:12px;">
+                        <label class="form-label"><i class="bi bi-cpu"></i> AI 多因子参数</label>
+                        <div class="row">
+                            <div class="col-6 mb-2">
+                                <label class="form-label small">训练窗口</label>
+                                <input type="number" class="form-control form-control-sm" id="s-train-window" value="500" min="100">
+                            </div>
+                            <div class="col-6 mb-2">
+                                <label class="form-label small">重训间隔</label>
+                                <input type="number" class="form-control form-control-sm" id="s-retrain" value="50" min="10">
+                            </div>
+                            <div class="col-4 mb-2">
+                                <label class="form-label small">买入阈值</label>
+                                <input type="number" class="form-control form-control-sm" id="s-buy-th" value="0.60" step="0.05" min="0.5" max="0.95">
+                            </div>
+                            <div class="col-4 mb-2">
+                                <label class="form-label small">卖出阈值</label>
+                                <input type="number" class="form-control form-control-sm" id="s-sell-th" value="0.40" step="0.05" min="0.05" max="0.5">
+                            </div>
+                            <div class="col-4 mb-2">
+                                <label class="form-label small">树深度</label>
+                                <input type="number" class="form-control form-control-sm" id="s-max-depth" value="5" min="2" max="10">
+                            </div>
+                        </div>
                     </div>
                     <div class="row">
                         <div class="col-4 mb-3">
@@ -103,6 +129,7 @@
 {% block scripts %}
 <script>
 const typeNames = {
+    ai_multi_factor: '🧠 AI 多因子',
     macd_cross: 'MACD 金叉/死叉',
     rsi_reversal: 'RSI 超买超卖',
     bollinger_breakout: '布林带突破',
@@ -173,6 +200,19 @@ document.getElementById('strategy-form').onsubmit = async (e) => {
         trailing_stop_pct: document.getElementById('s-trail').value,
         paper: true,
     };
+
+    // AI 多因子参数
+    if (data.type === 'ai_multi_factor') {
+        data.params = {
+            train_window: parseInt(document.getElementById('s-train-window').value) || 500,
+            retrain_interval: parseInt(document.getElementById('s-retrain').value) || 50,
+            buy_threshold: parseFloat(document.getElementById('s-buy-th').value) || 0.6,
+            sell_threshold: parseFloat(document.getElementById('s-sell-th').value) || 0.4,
+            max_depth: parseInt(document.getElementById('s-max-depth').value) || 5,
+            n_estimators: 100,
+            target_return: 0.002,
+        };
+    }
     const r = await API.post('/api/strategies', data);
     if (r.ok) {
         toast(`策略创建成功 (ID: ${r.id})`, 'success');
@@ -183,5 +223,13 @@ document.getElementById('strategy-form').onsubmit = async (e) => {
 };
 
 loadStrategies();
+
+// 根据策略类型显示/隐藏 AI 参数面板
+document.getElementById('s-type').onchange = function() {
+    document.getElementById('ai-params').style.display =
+        this.value === 'ai_multi_factor' ? 'block' : 'none';
+};
+// 初始化
+document.getElementById('s-type').dispatchEvent(new Event('change'));
 </script>
 {% endblock %}
