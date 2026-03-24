@@ -19,3 +19,8 @@ from .risk import (
     VolatilityEngine, RiskLevel, RiskEventType, RiskEvent,
     risk_manager
 )
+from .sentiment import (
+    SentimentEngine, SentimentAnalyzer, NewsFetcher,
+    OnChainMonitor, SentimentItem, SentimentSnapshot,
+    sentiment_engine
+)
