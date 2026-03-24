@@ -249,11 +249,20 @@ class StrategyEngine:
 
 
 # ================================================================
-# 交易所客户端
+# 交易所客户端 — 含本地缓存
 # ================================================================
+
+import hashlib
+import pickle
+
+_CACHE_DIR = DATA_DIR / 'cache'
+_CACHE_DIR.mkdir(exist_ok=True)
+_CACHE_TTL = 300  # 5分钟缓存
+
 
 class ExchangeClient:
     def __init__(self, exchange_id='binance', api_key='', api_secret='', passphrase=''):
+        self.exchange_id = exchange_id
         cls = getattr(ccxt, exchange_id)
         params = {'enableRateLimit': True}
         if api_key:
@@ -263,14 +272,48 @@ class ExchangeClient:
                 params['password'] = passphrase
         self.exchange = cls(params)
 
+    def _cache_key(self, symbol, timeframe, limit=None, since=None, end=None):
+        raw = f"{self.exchange_id}:{symbol}:{timeframe}:{limit}:{since}:{end}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def _read_cache(self, key):
+        path = _CACHE_DIR / f"{key}.pkl"
+        if path.exists():
+            age = time.time() - path.stat().st_mtime
+            if age < _CACHE_TTL:
+                try:
+                    return pickle.loads(path.read_bytes())
+                except:
+                    pass
+        return None
+
+    def _write_cache(self, key, data):
+        try:
+            (_CACHE_DIR / f"{key}.pkl").write_bytes(pickle.dumps(data))
+        except:
+            pass
+
     def fetch_ohlcv(self, symbol, timeframe='1h', limit=500):
+        key = self._cache_key(symbol, timeframe, limit=limit)
+        cached = self._read_cache(key)
+        if cached is not None:
+            return cached
         data = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(data, columns=['timestamp','open','high','low','close','volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-        return df.astype(float)
+        df = df.astype(float)
+        self._write_cache(key, df)
+        return df
 
     def fetch_ohlcv_range(self, symbol, timeframe, start, end):
+        # 尝试从本地CSV缓存读取
+        cache_file = _CACHE_DIR / f"{symbol.replace('/','_')}_{timeframe}_{start}_{end}.csv"
+        if cache_file.exists():
+            age = time.time() - cache_file.stat().st_mtime
+            if age < 3600:  # 范围数据缓存1小时
+                return pd.read_csv(cache_file, index_col=0, parse_dates=True)
+
         start_ts = int(pd.Timestamp(start).timestamp() * 1000)
         end_ts = int(pd.Timestamp(end).timestamp() * 1000)
         all_data = []
@@ -289,7 +332,13 @@ class ExchangeClient:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df = df[~df.index.duplicated(keep='first')]
-        return df.astype(float)
+        df = df.astype(float)
+        # 写入缓存
+        try:
+            df.to_csv(cache_file)
+        except:
+            pass
+        return df
 
     def create_market_order(self, symbol, side, amount):
         return self.exchange.create_order(symbol, 'market', side, amount)
@@ -310,106 +359,146 @@ class ExchangeClient:
 
 
 # ================================================================
-# 回测引擎
+# 回测引擎 — 向量化优化版
 # ================================================================
 
 class BacktestEngine:
+    """
+    向量化回测引擎
+    优化点：
+    1. 预计算全部信号（向量化），不再逐K线调用策略
+    2. 交易模拟用 numpy 数组操作
+    3. 减少 Python 对象创建
+    """
+
     @staticmethod
     def run(df, strategy_type, params, capital=10000, commission=0.0004,
             slippage=0.0005, leverage=1, position_pct=10, stop_loss_pct=3,
             take_profit_pct=6, trailing_stop=True, trailing_pct=2):
         df = Indicators.add_all(df)
-        signals = []
 
-        # 逐K线扫描生成信号
-        for i in range(50, len(df)):
-            window = df.iloc[:i+1]
-            sigs = StrategyEngine.generate_signals(window, strategy_type, params)
-            for s in sigs:
-                s['index'] = i
-                signals.append(s)
+        # === 向量化信号生成 ===
+        buy_signals, sell_signals = BacktestEngine._vectorized_signals(
+            df, strategy_type, params
+        )
 
-        # 模拟交易
+        # === 向量化交易模拟 ===
+        close = df['close'].values
+        n = len(close)
+
+        # 状态数组
+        in_position = np.zeros(n, dtype=bool)
+        entry_prices = np.zeros(n)
+        position_sizes = np.zeros(n)
+        position_sides = np.zeros(n, dtype=int)  # 1=long, -1=short, 0=none
+
         cash = capital
-        position = None
         trades = []
-        equity_curve = []
+        equity_curve = np.zeros(n)
         max_equity = capital
-        max_dd = 0
+        max_dd = 0.0
 
-        for i in range(len(df)):
-            price = df.iloc[i]['close']
+        has_pos = False
+        pos_entry = 0.0
+        pos_size = 0.0
+        pos_side = 0
+        pos_highest = 0.0
+        pos_lowest = 0.0
 
-            if position:
-                position['current'] = price
-                if position['side'] == 'long':
-                    pnl_pct = (price / position['entry'] - 1) * 100
-                    if position.get('highest', price) < price:
-                        position['highest'] = price
+        for i in range(n):
+            price = close[i]
+
+            # 持仓管理
+            if has_pos:
+                if pos_side == 1:
+                    pnl_pct = (price / pos_entry - 1) * 100
+                    pos_highest = max(pos_highest, price)
                 else:
-                    pnl_pct = (position['entry'] / price - 1) * 100
-                    if position.get('lowest', price) > price:
-                        position['lowest'] = price
+                    pnl_pct = (pos_entry / price - 1) * 100
+                    pos_lowest = min(pos_lowest, price)
+
+                should_exit = False
+                exit_reason = ''
 
                 # 止损
                 if pnl_pct <= -stop_loss_pct:
-                    exit_price = price * (1 - slippage) if position['side'] == 'long' else price * (1 + slippage)
-                    pnl = (exit_price - position['entry']) * position['size'] if position['side'] == 'long' else (position['entry'] - exit_price) * position['size']
-                    fee = abs(pnl) * commission if pnl > 0 else position['size'] * exit_price * commission
-                    cash += pnl - fee
-                    trades.append({**position, 'exit_price': exit_price, 'pnl': pnl - fee, 'pnl_pct': pnl_pct, 'reason': 'stop_loss'})
-                    position = None
-
+                    should_exit = True
+                    exit_reason = 'stop_loss'
                 # 止盈
                 elif pnl_pct >= take_profit_pct:
-                    exit_price = price * (1 - slippage) if position['side'] == 'long' else price * (1 + slippage)
-                    pnl = (exit_price - position['entry']) * position['size'] if position['side'] == 'long' else (position['entry'] - exit_price) * position['size']
-                    fee = abs(pnl) * commission
-                    cash += pnl - fee
-                    trades.append({**position, 'exit_price': exit_price, 'pnl': pnl - fee, 'pnl_pct': pnl_pct, 'reason': 'take_profit'})
-                    position = None
-
+                    should_exit = True
+                    exit_reason = 'take_profit'
                 # 追踪止损
                 elif trailing_stop and pnl_pct > 0:
-                    if position['side'] == 'long':
-                        pullback = (position.get('highest', price) - price) / position.get('highest', price) * 100
+                    if pos_side == 1:
+                        pullback = (pos_highest - price) / pos_highest * 100
                         if pullback >= trailing_pct:
-                            exit_price = price * (1 - slippage)
-                            pnl = (exit_price - position['entry']) * position['size']
-                            fee = abs(pnl) * commission
-                            cash += pnl - fee
-                            trades.append({**position, 'exit_price': exit_price, 'pnl': pnl - fee, 'pnl_pct': pnl_pct, 'reason': 'trailing_stop'})
-                            position = None
+                            should_exit = True
+                            exit_reason = 'trailing_stop'
+                    else:
+                        pullback = (price - pos_lowest) / pos_lowest * 100
+                        if pullback >= trailing_pct:
+                            should_exit = True
+                            exit_reason = 'trailing_stop'
 
-            # 检查信号
-            for sig in signals:
-                if sig['index'] == i and position is None:
-                    entry = price * (1 + slippage) if sig['type'] == 'buy' else price * (1 - slippage)
+                if should_exit:
+                    slippage_adj = (1 - slippage) if pos_side == 1 else (1 + slippage)
+                    exit_price = price * slippage_adj
+                    pnl = (exit_price - pos_entry) * pos_size * pos_side
+                    fee = abs(pnl) * commission if pnl > 0 else pos_size * exit_price * commission
+                    cash += pnl - fee
+                    trades.append({
+                        'side': 'long' if pos_side == 1 else 'short',
+                        'entry': pos_entry, 'exit_price': exit_price,
+                        'pnl': pnl - fee, 'pnl_pct': pnl_pct, 'reason': exit_reason,
+                    })
+                    has_pos = False
+                    pos_side = 0
+
+            # 开仓信号
+            if not has_pos:
+                if buy_signals[i]:
+                    entry = price * (1 + slippage)
                     size = (cash * position_pct / 100 * leverage) / entry
                     fee = size * entry * commission
                     cash -= fee
-                    position = {
-                        'side': 'long' if sig['type'] == 'buy' else 'short',
-                        'entry': entry, 'size': size, 'open_bar': i,
-                        'highest': entry, 'lowest': entry,
-                    }
+                    has_pos = True
+                    pos_entry = entry
+                    pos_size = size
+                    pos_side = 1
+                    pos_highest = entry
+                elif sell_signals[i]:
+                    entry = price * (1 - slippage)
+                    size = (cash * position_pct / 100 * leverage) / entry
+                    fee = size * entry * commission
+                    cash -= fee
+                    has_pos = True
+                    pos_entry = entry
+                    pos_size = size
+                    pos_side = -1
+                    pos_lowest = entry
 
-            # 最后一根K线平仓
-            if position and i == len(df) - 1:
-                exit_price = price * (1 - slippage) if position['side'] == 'long' else price * (1 + slippage)
-                pnl = (exit_price - position['entry']) * position['size'] if position['side'] == 'long' else (position['entry'] - exit_price) * position['size']
-                fee = abs(pnl) * commission if pnl > 0 else position['size'] * exit_price * commission
+            # 末尾平仓
+            if has_pos and i == n - 1:
+                slippage_adj = (1 - slippage) if pos_side == 1 else (1 + slippage)
+                exit_price = price * slippage_adj
+                pnl = (exit_price - pos_entry) * pos_size * pos_side
+                fee = abs(pnl) * commission if pnl > 0 else pos_size * exit_price * commission
                 cash += pnl - fee
-                trades.append({**position, 'exit_price': exit_price, 'pnl': pnl - fee, 'pnl_pct': (pnl / (position['entry'] * position['size'])) * 100, 'reason': 'end'})
-                position = None
+                trades.append({
+                    'side': 'long' if pos_side == 1 else 'short',
+                    'entry': pos_entry, 'exit_price': exit_price,
+                    'pnl': pnl - fee,
+                    'pnl_pct': (pnl / (pos_entry * pos_size)) * 100,
+                    'reason': 'end',
+                })
+                has_pos = False
 
+            # 权益
             eq = cash
-            if position:
-                if position['side'] == 'long':
-                    eq += (price - position['entry']) * position['size']
-                else:
-                    eq += (position['entry'] - price) * position['size']
-            equity_curve.append(eq)
+            if has_pos:
+                eq += (price - pos_entry) * pos_size * pos_side
+            equity_curve[i] = eq
             max_equity = max(max_equity, eq)
             dd = (max_equity - eq) / max_equity * 100 if max_equity > 0 else 0
             max_dd = max(max_dd, dd)
@@ -425,17 +514,17 @@ class BacktestEngine:
 
         return {
             'initial_capital': capital,
-            'final_capital': cash,
-            'total_return_pct': (cash / capital - 1) * 100,
+            'final_capital': round(cash, 2),
+            'total_return_pct': round((cash / capital - 1) * 100, 2),
             'total_trades': len(trades),
             'winning_trades': len(wins),
             'losing_trades': len(losses),
-            'win_rate': len(wins) / len(trades) * 100 if trades else 0,
-            'avg_win_pct': np.mean([t['pnl_pct'] for t in wins]) if wins else 0,
-            'avg_loss_pct': np.mean([t['pnl_pct'] for t in losses]) if losses else 0,
-            'profit_factor': total_profit / total_loss if total_loss > 0 else 0,
-            'max_drawdown_pct': max_dd,
-            'sharpe_ratio': sharpe,
+            'win_rate': round(len(wins) / len(trades) * 100, 1) if trades else 0,
+            'avg_win_pct': round(float(np.mean([t['pnl_pct'] for t in wins])), 2) if wins else 0,
+            'avg_loss_pct': round(float(np.mean([t['pnl_pct'] for t in losses])), 2) if losses else 0,
+            'profit_factor': round(total_profit / total_loss, 2) if total_loss > 0 else 0,
+            'max_drawdown_pct': round(max_dd, 2),
+            'sharpe_ratio': round(sharpe, 2),
             'trades': [
                 {
                     'side': t['side'],
@@ -447,8 +536,56 @@ class BacktestEngine:
                 }
                 for t in trades
             ],
-            'equity_curve': [round(e, 2) for e in equity_curve],
+            'equity_curve': [round(float(e), 2) for e in equity_curve],
         }
+
+    @staticmethod
+    def _vectorized_signals(df, strategy_type, params):
+        """向量化信号预计算 — 返回 (buy_mask, sell_mask) numpy 数组"""
+        n = len(df)
+        buy = np.zeros(n, dtype=bool)
+        sell = np.zeros(n, dtype=bool)
+
+        if strategy_type == 'macd_cross':
+            macd = df['macd'].values
+            sig = df['macd_signal'].values
+            # 金叉：前一根 MACD<=Signal, 当前 MACD>Signal
+            buy[1:] = (macd[:-1] <= sig[:-1]) & (macd[1:] > sig[1:])
+            # 死叉
+            sell[1:] = (macd[:-1] >= sig[:-1]) & (macd[1:] < sig[1:])
+
+        elif strategy_type == 'rsi_reversal':
+            rsi = df['rsi'].values
+            oversold = params.get('oversold', 30)
+            overbought = params.get('overbought', 70)
+            buy[1:] = (rsi[:-1] < oversold) & (rsi[1:] >= oversold)
+            sell[1:] = (rsi[:-1] > overbought) & (rsi[1:] <= overbought)
+
+        elif strategy_type == 'bollinger_breakout':
+            close = df['close'].values
+            upper = df['bb_upper'].values
+            lower = df['bb_lower'].values
+            buy[1:] = (close[:-1] <= upper[:-1]) & (close[1:] > upper[1:])
+            sell[1:] = (close[:-1] >= lower[:-1]) & (close[1:] < lower[1:])
+
+        elif strategy_type == 'dual_ma':
+            fast_p = params.get('fast_period', 10)
+            slow_p = params.get('slow_period', 30)
+            ma_type = params.get('ma_type', 'ema')
+            if ma_type == 'ema':
+                fast_ma = df['close'].ewm(span=fast_p, adjust=False).mean().values
+                slow_ma = df['close'].ewm(span=slow_p, adjust=False).mean().values
+            else:
+                fast_ma = df['close'].rolling(fast_p).mean().values
+                slow_ma = df['close'].rolling(slow_p).mean().values
+            buy[1:] = (fast_ma[:-1] <= slow_ma[:-1]) & (fast_ma[1:] > slow_ma[1:])
+            sell[1:] = (fast_ma[:-1] >= slow_ma[:-1]) & (fast_ma[1:] < slow_ma[1:])
+
+        # 过滤掉前50根（指标未稳定）
+        buy[:50] = False
+        sell[:50] = False
+
+        return buy, sell
 
 
 # ================================================================
