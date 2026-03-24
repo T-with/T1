@@ -430,11 +430,18 @@ def api_agents_debate():
 def api_agents_status():
     """检查 Agent 系统状态"""
     from engine.agents import orchestrator
+    from engine.llm import check_connection
+
     status = {
         'agents': [{'name': a.name, 'icon': a.icon, 'weight': a.vote_weight} for a in orchestrator.agents],
         'total_agents': len(orchestrator.agents),
         'status': 'ready',
     }
+
+    # 检查 LLM API 连通性
+    llm_status = check_connection()
+    status['llm'] = llm_status
+
     # 测试 Binance 公共 API 连通性
     try:
         client = ExchangeClient('binance')
