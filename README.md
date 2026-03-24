@@ -30,7 +30,11 @@ Binance / OKX / Bybit / Bitget / KuCoin / Gate.io
 
 ## 部署
 
+详细部署流程见 **[DEPLOY.md](DEPLOY.md)**
+
 ```bash
+# 快速启动
+cp .env.example .env        # 修改密码
 docker compose up -d --build
 ```
 
