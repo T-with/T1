@@ -1,0 +1,409 @@
+{% extends "base.html" %}
+{% block title %}Agent 团队 — MyTradingPlatform{% endblock %}
+
+{% block head %}
+<style>
+    .agent-card { transition: all 0.3s; border-left: 4px solid var(--border); }
+    .agent-card.buy { border-left-color: var(--green); }
+    .agent-card.sell { border-left-color: var(--red); }
+    .agent-card.hold { border-left-color: var(--text-dim); }
+    .agent-icon { font-size: 2.5rem; }
+    .vote-bubble { padding: 1rem; border-radius: 12px; margin-bottom: 0.8rem; }
+    .vote-buy { background: rgba(63,185,80,0.08); }
+    .vote-sell { background: rgba(248,81,73,0.08); }
+    .vote-hold { background: rgba(139,148,158,0.08); }
+    .final-decision { text-align: center; padding: 2.5rem; }
+    .final-action { font-size: 3rem; font-weight: 800; }
+    .consensus-bar { height: 12px; border-radius: 6px; overflow: hidden; display: flex; }
+    .consensus-segment { transition: width 0.8s ease; }
+    .timeline-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+    .debate-section { border-left: 2px solid var(--border); padding-left: 1.5rem; margin-left: 0.5rem; }
+    .agent-status-badge { font-size: 0.7rem; padding: 0.2rem 0.6rem; border-radius: 10px; }
+    @keyframes fadeInUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
+    .animate-in { animation: fadeInUp 0.5s ease forwards; }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- 控制栏 -->
+<div class="card mb-3">
+    <div class="card-body d-flex align-items-center gap-3 flex-wrap">
+        <div>
+            <label class="form-label small mb-1">交易对</label>
+            <select class="form-select form-select-sm" id="ag-symbol">
+                <option value="BTC/USDT">BTC/USDT</option>
+                <option value="ETH/USDT">ETH/USDT</option>
+                <option value="SOL/USDT">SOL/USDT</option>
+                <option value="BNB/USDT">BNB/USDT</option>
+            </select>
+        </div>
+        <div>
+            <label class="form-label small mb-1">K线周期</label>
+            <select class="form-select form-select-sm" id="ag-timeframe">
+                <option value="1h" selected>1H</option>
+                <option value="4h">4H</option>
+                <option value="1d">1D</option>
+            </select>
+        </div>
+        <div class="ms-auto">
+            <button class="btn btn-primary" id="ag-run-btn" onclick="runDebate()">
+                <i class="bi bi-people"></i> 启动分析
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Agent 团队头像栏 -->
+<div class="card mb-3" id="agents-bar">
+    <div class="card-body d-flex justify-content-around align-items-center flex-wrap gap-2">
+        <div class="text-center agent-avatar" data-agent="tech">
+            <div class="agent-icon">📊</div>
+            <div class="small">技术分析师</div>
+            <span class="agent-status-badge bg-secondary" id="status-tech">待命</span>
+        </div>
+        <div class="text-center agent-avatar" data-agent="news">
+            <div class="agent-icon">📰</div>
+            <div class="small">新闻情绪师</div>
+            <span class="agent-status-badge bg-secondary" id="status-news">待命</span>
+        </div>
+        <div class="text-center agent-avatar" data-agent="chain">
+            <div class="agent-icon">⛓️</div>
+            <div class="small">链上数据师</div>
+            <span class="agent-status-badge bg-secondary" id="status-chain">待命</span>
+        </div>
+        <div class="text-center agent-avatar" data-agent="risk">
+            <div class="agent-icon">🛡️</div>
+            <div class="small">风控官</div>
+            <span class="agent-status-badge bg-secondary" id="status-risk">待命</span>
+        </div>
+        <div class="text-center agent-avatar" data-agent="quant">
+            <div class="agent-icon">🧮</div>
+            <div class="small">量化模型师</div>
+            <span class="agent-status-badge bg-secondary" id="status-quant">待命</span>
+        </div>
+    </div>
+</div>
+
+<!-- 结果区域 -->
+<div id="ag-results" style="display:none;">
+
+<!-- 最终决策 -->
+<div class="card mb-3">
+    <div class="final-decision">
+        <div class="text-muted small mb-2">🏆 Agent 团队最终决策</div>
+        <div class="final-action" id="final-action">--</div>
+        <div class="h5 mt-2" id="final-text">--</div>
+        <div class="text-muted mt-2">综合置信度: <strong id="final-confidence">--</strong>%</div>
+
+        <!-- 共识度 -->
+        <div class="mt-4 px-5">
+            <div class="d-flex justify-content-between small text-muted mb-1">
+                <span>共识度: <strong id="consensus-level">--</strong></span>
+                <span id="consensus-pct">--</span>
+            </div>
+            <div class="consensus-bar">
+                <div class="consensus-segment" id="bar-buy" style="width:33%;background:var(--green);"></div>
+                <div class="consensus-segment" id="bar-hold" style="width:34%;background:var(--text-dim);"></div>
+                <div class="consensus-segment" id="bar-sell" style="width:33%;background:var(--red);"></div>
+            </div>
+            <div class="d-flex justify-content-between small mt-1">
+                <span class="green">买入 <span id="score-buy">0</span>%</span>
+                <span class="text-muted">观望 <span id="score-hold">0</span>%</span>
+                <span class="red">卖出 <span id="score-sell">0</span>%</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 讨论记录（Agent 发言气泡） -->
+<div class="card mb-3">
+    <div class="card-header"><h6 class="mb-0"><i class="bi bi-chat-dots"></i> 讨论记录</h6></div>
+    <div class="card-body" id="debate-timeline">
+        <div class="loading">等待分析...</div>
+    </div>
+</div>
+
+<!-- Agent 详细分析卡片 -->
+<div class="row g-3 mb-3" id="agent-cards">
+</div>
+
+<!-- 新闻详情（如果有） -->
+<div class="card mb-3" id="news-card" style="display:none;">
+    <div class="card-header"><h6 class="mb-0"><i class="bi bi-newspaper"></i> 新闻热点</h6></div>
+    <div class="card-body" id="news-content"></div>
+</div>
+
+<!-- 投票权重图 -->
+<div class="card">
+    <div class="card-header"><h6 class="mb-0"><i class="bi bi-bar-chart"></i> 投票权重分布</h6></div>
+    <div class="card-body">
+        <canvas id="vote-chart" height="150"></canvas>
+    </div>
+</div>
+
+</div>
+
+<!-- 占位 -->
+<div class="card" id="ag-placeholder">
+    <div class="card-body text-center py-5">
+        <div style="font-size:4rem;">🤖🤖🤖🤖🤖</div>
+        <h4 class="mt-3">多 Agent 协作交易系统</h4>
+        <p class="text-muted">5 个 AI Agent 独立分析，讨论投票后给出最终决策</p>
+        <div class="row text-start mt-4 px-4">
+            <div class="col-md">
+                <p>📊 <strong>技术分析师</strong> — RSI / MACD / 布林带 / 均线 / 量价</p>
+                <p>📰 <strong>新闻情绪师</strong> — 加密货币新闻抓取 + NLP 情绪分析</p>
+            </div>
+            <div class="col-md">
+                <p>⛓️ <strong>链上数据师</strong> — 资金费率 / 多空比 / 未平仓合约</p>
+                <p>🛡️ <strong>风控官</strong> — 波动率 / 回撤 / VaR / 极端位置检测</p>
+            </div>
+            <div class="col-md">
+                <p>🧮 <strong>量化模型师</strong> — XGBoost 多因子预测</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+let voteChart = null;
+
+// Agent 图标颜色
+const agentColors = {
+    '📊 技术分析师': '#58a6ff',
+    '📰 新闻情绪师': '#d29922',
+    '⛓️ 链上数据师': '#bc8cff',
+    '🛡️ 风控官': '#3fb950',
+    '🧮 量化模型师': '#f85149',
+};
+
+const actionClass = { buy: 'green', sell: 'red', hold: 'text-muted' };
+const actionIcon = { buy: '⬆️', sell: '⬇️', hold: '⏸️' };
+const actionText = { buy: '买入', sell: '卖出', hold: '观望' };
+
+async function runDebate() {
+    const btn = document.getElementById('ag-run-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Agent 团队分析中...';
+
+    // 重置状态
+    document.querySelectorAll('[id^="status-"]').forEach(el => {
+        el.className = 'agent-status-badge bg-warning text-dark';
+        el.innerHTML = '<span class="pulse-dot bg-warning"></span> 分析中';
+    });
+
+    try {
+        const data = {
+            symbol: document.getElementById('ag-symbol').value,
+            timeframe: document.getElementById('ag-timeframe').value,
+            params: { train_window: 500 },
+        };
+
+        const r = await API.post('/api/agents/debate', data);
+
+        if (r.error || r.status !== 'ok') {
+            toast(r.error || '分析失败', 'danger');
+            return;
+        }
+
+        document.getElementById('ag-placeholder').style.display = 'none';
+        document.getElementById('ag-results').style.display = 'block';
+
+        renderFinalDecision(r.final_decision, r.consensus);
+        renderAgentStatuses(r.agents);
+        renderDebateTimeline(r.agents);
+        renderAgentCards(r.agents);
+        renderNewsDetail(r.agents);
+        renderVoteChart(r.final_decision.vote_breakdown);
+
+    } catch (e) {
+        toast('分析失败: ' + e.message, 'danger');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-people"></i> 启动分析';
+    }
+}
+
+function renderFinalDecision(decision, consensus) {
+    const el = document.getElementById('final-action');
+    el.textContent = actionIcon[decision.action] + ' ' + actionText[decision.action];
+    el.className = 'final-action ' + actionClass[decision.action];
+
+    document.getElementById('final-text').textContent =
+        `Agent 团队投票: ${actionText[decision.action]}`;
+    document.getElementById('final-confidence').textContent = decision.confidence;
+
+    // 共识度
+    document.getElementById('consensus-level').textContent = consensus.level;
+    document.getElementById('consensus-pct').textContent = consensus.agreement_pct + '%';
+
+    // 得分条
+    const scores = decision.scores;
+    const total = scores.buy + scores.sell + scores.hold || 1;
+    document.getElementById('bar-buy').style.width = (scores.buy / total * 100) + '%';
+    document.getElementById('bar-hold').style.width = (scores.hold / total * 100) + '%';
+    document.getElementById('bar-sell').style.width = (scores.sell / total * 100) + '%';
+    document.getElementById('score-buy').textContent = scores.buy;
+    document.getElementById('score-hold').textContent = scores.hold;
+    document.getElementById('score-sell').textContent = scores.sell;
+}
+
+function renderAgentStatuses(agents) {
+    const statusMap = {
+        '技术分析师': 'tech', '新闻情绪师': 'news',
+        '链上数据师': 'chain', '风控官': 'risk', '量化模型师': 'quant',
+    };
+    agents.forEach(a => {
+        const key = statusMap[a.name.replace(a.icon + ' ', '')] || statusMap[a.name];
+        const el = document.getElementById('status-' + (key || a.name));
+        if (!el) return;
+        const cls = a.action === 'buy' ? 'bg-success' : a.action === 'sell' ? 'bg-danger' : 'bg-secondary';
+        el.className = `agent-status-badge ${cls}`;
+        el.textContent = actionIcon[a.action] + ' ' + actionText[a.action];
+    });
+}
+
+function renderDebateTimeline(agents) {
+    const container = document.getElementById('debate-timeline');
+    container.innerHTML = agents.map((a, i) => {
+        const bubbleClass = a.action === 'buy' ? 'vote-buy' : a.action === 'sell' ? 'vote-sell' : 'vote-hold';
+        const color = agentColors[`${a.icon} ${a.name}`] || '#8b949e';
+        return `<div class="vote-bubble ${bubbleClass} animate-in" style="animation-delay:${i*0.15}s">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <strong style="color:${color}">${a.icon} ${a.name}</strong>
+                    <span class="badge ms-2 ${a.action==='buy'?'bg-success':a.action==='sell'?'bg-danger':'bg-secondary'}">
+                        ${actionIcon[a.action]} ${actionText[a.action]} (置信度 ${a.confidence}%)
+                    </span>
+                </div>
+                <small class="text-muted">权重 ${a.weight*100}%</small>
+            </div>
+            <div class="mt-2 text-muted small">${a.reasoning}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderAgentCards(agents) {
+    const container = document.getElementById('agent-cards');
+    container.innerHTML = agents.map(a => {
+        const color = agentColors[`${a.icon} ${a.name}`] || '#8b949e';
+        let detailsHtml = '';
+
+        // 根据 Agent 类型展示不同详情
+        if (a.name === '技术分析师' && a.details) {
+            const d = a.details;
+            detailsHtml = `
+                <div class="row small">
+                    <div class="col-6">RSI: <strong>${d.rsi}</strong></div>
+                    <div class="col-6">MACD: <strong>${d.macd}</strong></div>
+                    <div class="col-6">BB位置: <strong>${d.bb_position}</strong></div>
+                    <div class="col-6">量比: <strong>${d.vol_ratio}</strong></div>
+                    <div class="col-6">5日动量: <strong>${d.mom_5d}%</strong></div>
+                    <div class="col-6">20日动量: <strong>${d.mom_20d}%</strong></div>
+                </div>`;
+        } else if (a.name === '新闻情绪师' && a.details) {
+            const d = a.details;
+            detailsHtml = `
+                <div class="small">
+                    <div>分析 <strong>${d.news_count}</strong> 条新闻</div>
+                    <div class="mt-1">
+                        <span class="green">正面 ${d.positive}</span> ·
+                        <span class="text-muted">中性 ${d.neutral}</span> ·
+                        <span class="red">负面 ${d.negative}</span>
+                    </div>
+                    <div class="mt-1">情绪值: <strong class="${d.sentiment_score >= 0 ? 'green' : 'red'}">${d.sentiment_score}</strong></div>
+                    ${d.hot_words?.length ? `<div class="mt-1">热词: ${d.hot_words.map(w => `<code>${w[0]}</code>`).join(' ')}</div>` : ''}
+                </div>`;
+        } else if (a.name === '链上数据师' && a.details) {
+            const d = a.details;
+            detailsHtml = `
+                <div class="small">
+                    ${d.funding_rate !== undefined ? `<div>资金费率: <strong>${(d.funding_rate*100).toFixed(4)}%</strong></div>` : ''}
+                    ${d.long_short_ratio !== undefined ? `<div>多空比: <strong>${d.long_short_ratio}</strong></div>` : ''}
+                    ${d.open_interest ? `<div>未平仓合约: <strong>${d.open_interest}</strong></div>` : ''}
+                </div>`;
+        } else if (a.name === '风控官' && a.details) {
+            const d = a.details;
+            detailsHtml = `
+                <div class="small">
+                    <div>年化波动率: <strong>${d.annual_volatility}%</strong></div>
+                    <div>20日回撤: <strong class="${d.max_drawdown_20d < -5 ? 'red' : ''}">${d.max_drawdown_20d}%</strong></div>
+                    <div>VaR(95%): <strong>${d.VaR_95}%</strong></div>
+                    <div>60日位置: <strong>${(d.price_position_60d*100).toFixed(0)}%</strong></div>
+                </div>`;
+        } else if (a.name === '量化模型师' && a.details) {
+            detailsHtml = `<div class="small">模型: <strong>${a.details.model}</strong></div>`;
+        }
+
+        return `<div class="col-md-6 col-lg-4">
+            <div class="card agent-card ${a.action} h-100 animate-in">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span class="agent-icon" style="font-size:1.5rem;">${a.icon}</span>
+                        <span class="badge ${a.action==='buy'?'bg-success':a.action==='sell'?'bg-danger':'bg-secondary'}">
+                            ${actionIcon[a.action]} ${actionText[a.action]}
+                        </span>
+                    </div>
+                    <h6 class="mb-1">${a.name}</h6>
+                    <div class="small text-muted mb-2">置信度 ${a.confidence}% · 权重 ${a.weight*100}%</div>
+                    <div class="small text-muted mb-2">${a.reasoning}</div>
+                    ${detailsHtml}
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderNewsDetail(agents) {
+    const newsAgent = agents.find(a => a.name === '新闻情绪师');
+    if (!newsAgent?.details?.top_headlines?.length) return;
+
+    document.getElementById('news-card').style.display = 'block';
+    document.getElementById('news-content').innerHTML = newsAgent.details.top_headlines.map(h =>
+        `<div class="py-1 border-bottom small" style="border-color:var(--border);">
+            <i class="bi bi-newspaper text-muted me-1"></i> ${h}
+        </div>`
+    ).join('');
+}
+
+function renderVoteChart(breakdown) {
+    if (voteChart) voteChart.destroy();
+
+    const labels = breakdown.map(b => b.agent);
+    const effective = breakdown.map(b => b.effective_weight);
+    const colors = breakdown.map(b => {
+        const c = agentColors[b.agent] || '#8b949e';
+        return c;
+    });
+
+    voteChart = new Chart(document.getElementById('vote-chart'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                label: '有效投票权重',
+                data: effective,
+                backgroundColor: colors.map(c => c + '88'),
+                borderColor: colors,
+                borderWidth: 2,
+                borderRadius: 6,
+            }],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+                y: { ticks: { color: '#e6edf3', font: { size: 11 } }, grid: { display: false } },
+            },
+        },
+    });
+}
+</script>
+{% endblock %}

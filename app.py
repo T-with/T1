@@ -16,6 +16,7 @@ from engine.core import (
     decrypt_strategy_secrets,
     AIMultiFactorStrategy,
 )
+from engine.agents import orchestrator
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -116,6 +117,10 @@ def settings_page():
 @app.route('/ai')
 def ai_page():
     return render_template('ai.html')
+
+@app.route('/agents')
+def agents_page():
+    return render_template('agents.html')
 
 @app.route('/health')
 def health():
@@ -385,6 +390,32 @@ def api_ai_analyze():
 
     except Exception as e:
         logger.error(f"AI analyze error: {e}", exc_info=True)
+        return jsonify({'error': str(e), 'status': 'error'}), 500
+
+
+@app.route('/api/agents/debate', methods=['POST'])
+def api_agents_debate():
+    """多 Agent 协作投票分析"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        params = data.get('params', {})
+
+        exchange_cfg = load_exchange()
+        client = ExchangeClient(exchange_cfg.get('exchange_id', 'binance'))
+
+        limit = max(params.get('train_window', 500) + 100, 600)
+        df = client.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+        if df.empty:
+            return jsonify({'error': '无法获取数据'}), 400
+
+        result = orchestrator.run_debate(df, symbol, params)
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Agents debate error: {e}", exc_info=True)
         return jsonify({'error': str(e), 'status': 'error'}), 500
 
 
