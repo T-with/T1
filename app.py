@@ -925,6 +925,70 @@ def api_rl_predict():
 
 
 # ================================================================
+# API: 网格 & DCA
+# ================================================================
+
+@app.route('/api/grid/config', methods=['POST'])
+def api_grid_config():
+    """获取 AI 动态网格参数"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        params = data.get('params', {})
+
+        client = ExchangeClient('binance')
+        df = client.fetch_ohlcv(symbol, timeframe, limit=100)
+
+        if df.empty:
+            return jsonify({'error': 'No data'}), 400
+
+        from engine.core import AIGridStrategy, Indicators
+        df = Indicators.add_all(df)
+        config = AIGridStrategy._compute_grid_params(df, params)
+        levels = AIGridStrategy.compute_grid_levels(
+            float(df['close'].iloc[-1]), config
+        )
+
+        return jsonify({
+            'symbol': symbol,
+            'current_price': round(float(df['close'].iloc[-1]), 2),
+            'config': config,
+            'grid_levels': levels,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dca/weight', methods=['POST'])
+def api_dca_weight():
+    """获取智能 DCA 本期投资权重"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        params = data.get('params', {})
+
+        client = ExchangeClient('binance')
+        df = client.fetch_ohlcv(symbol, timeframe, limit=100)
+
+        if df.empty:
+            return jsonify({'error': 'No data'}), 400
+
+        from engine.core import SmartDCAStrategy, Indicators
+        df = Indicators.add_all(df)
+        weight_info = SmartDCAStrategy._compute_weight(df, params)
+
+        return jsonify({
+            'symbol': symbol,
+            'current_price': round(float(df['close'].iloc[-1]), 2),
+            **weight_info,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ================================================================
 # 启动
 # ================================================================
 

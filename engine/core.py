@@ -267,6 +267,8 @@ class StrategyEngine:
         'lstm': 'LSTM 深度学习',
         'transformer': 'Transformer 注意力',
         'rl_ppo': '强化学习 PPO',
+        'ai_grid': 'AI 动态网格',
+        'smart_dca': '智能定投 DCA',
     }
 
     @staticmethod
@@ -283,6 +285,10 @@ class StrategyEngine:
             return StrategyEngine._dl_signal(df, strategy_type, params)
         elif strategy_type == 'rl_ppo':
             return StrategyEngine._rl_signal(df, params)
+        elif strategy_type == 'ai_grid':
+            return AIGridStrategy.generate_signals(df, params)
+        elif strategy_type == 'smart_dca':
+            return SmartDCAStrategy.generate_signals(df, params)
         elif strategy_type == 'macd_cross':
             return StrategyEngine._macd_cross(df, params)
         elif strategy_type == 'rsi_reversal':
@@ -936,6 +942,345 @@ class AIMultiFactorStrategy:
 
 
 # ================================================================
+# AI 动态网格策略
+# ================================================================
+
+class AIGridStrategy:
+    """
+    AI 动态网格交易策略
+
+    核心逻辑:
+    1. AI 预测波动率和价格区间 (基于 ATR + 布林带)
+    2. 自动设置网格上下限和密集度
+    3. 在网格交叉点挂单 (低买高卖)
+    4. 根据市场状态动态调整网格参数
+
+    市场状态适应:
+    - 震荡市: 密集网格，高频交易
+    - 趋势市: 稀疏网格，配合趋势过滤
+    - 高波动: 扩大网格间距，减少层数
+    - 低波动: 缩小网格间距，增加层数
+    """
+
+    @staticmethod
+    def generate_signals(df: pd.DataFrame, params: Dict) -> List[Dict]:
+        if len(df) < 50:
+            return []
+
+        df = Indicators.add_all(df)
+        signals = []
+
+        close = df['close'].values
+        curr = df.iloc[-1]
+        current_price = float(curr['close'])
+
+        # --- AI 参数计算 ---
+        grid_config = AIGridStrategy._compute_grid_params(df, params)
+
+        upper = grid_config['upper_bound']
+        lower = grid_config['lower_bound']
+        n_grids = grid_config['n_grids']
+        grid_spacing = (upper - lower) / n_grids
+
+        # 当前价格在网格中的位置 (0=下限, 1=上限)
+        if upper == lower:
+            return signals
+        price_pos = (current_price - lower) / (upper - lower)
+
+        # --- 信号生成 ---
+        # RSI 过滤：超卖区更积极买入，超买区更积极卖出
+        rsi = float(curr.get('rsi', 50))
+        rsi_buy_boost = max(0, (40 - rsi) / 40) if rsi < 40 else 0  # 超卖加成
+        rsi_sell_boost = max(0, (rsi - 60) / 40) if rsi > 60 else 0  # 超买加成
+
+        # 价格靠近网格下限 → 买入信号
+        if price_pos < 0.2 + rsi_buy_boost * 0.15:
+            confidence = (0.2 + rsi_buy_boost * 0.15 - price_pos) / (0.2 + rsi_buy_boost * 0.15)
+            signals.append({
+                'type': 'buy',
+                'price': current_price,
+                'confidence': round(min(confidence * 0.8, 0.9), 3),
+                'grid_info': {
+                    'position': round(price_pos, 3),
+                    'upper': round(upper, 2),
+                    'lower': round(lower, 2),
+                    'n_grids': n_grids,
+                    'spacing': round(grid_spacing, 2),
+                },
+            })
+
+        # 价格靠近网格上限 → 卖出信号
+        elif price_pos > 0.8 - rsi_sell_boost * 0.15:
+            confidence = (price_pos - (0.8 - rsi_sell_boost * 0.15)) / (1 - (0.8 - rsi_sell_boost * 0.15))
+            signals.append({
+                'type': 'sell',
+                'price': current_price,
+                'confidence': round(min(confidence * 0.8, 0.9), 3),
+                'grid_info': {
+                    'position': round(price_pos, 3),
+                    'upper': round(upper, 2),
+                    'lower': round(lower, 2),
+                    'n_grids': n_grids,
+                },
+            })
+
+        return signals
+
+    @staticmethod
+    def _compute_grid_params(df: pd.DataFrame, params: Dict) -> Dict:
+        """AI 自动计算网格参数"""
+        close = df['close'].values
+        curr = df.iloc[-1]
+        current_price = float(curr['close'])
+
+        # ATR 用于网格间距
+        atr = float(curr.get('atr', current_price * 0.02))
+        if np.isnan(atr) or atr <= 0:
+            atr = current_price * 0.02
+
+        # 布林带用于价格区间
+        bb_upper = float(curr.get('bb_upper', current_price * 1.05))
+        bb_lower = float(curr.get('bb_lower', current_price * 0.95))
+        bb_width = (bb_upper - bb_lower) / current_price if current_price > 0 else 0.1
+
+        # 波动率
+        vol_20 = float(pd.Series(close).pct_change().tail(20).std())
+        if np.isnan(vol_20):
+            vol_20 = 0.02
+
+        # 趋势判断
+        sma_20 = float(curr.get('sma_20', current_price))
+        sma_50 = float(curr.get('sma_50', current_price))
+        is_uptrend = sma_20 > sma_50
+        is_downtrend = sma_20 < sma_50
+
+        # --- AI 动态参数 ---
+        # 网格上下限：基于布林带 + ATR 扩展
+        atr_mult = params.get('atr_multiplier', 2.0)
+        if is_uptrend:
+            # 上涨趋势：下限更宽，上限更高
+            upper_bound = bb_upper + atr * atr_mult * 1.5
+            lower_bound = bb_lower - atr * atr_mult * 0.5
+        elif is_downtrend:
+            # 下跌趋势：下限更低，上限更窄
+            upper_bound = bb_upper + atr * atr_mult * 0.5
+            lower_bound = bb_lower - atr * atr_mult * 1.5
+        else:
+            # 震荡：对称
+            upper_bound = bb_upper + atr * atr_mult
+            lower_bound = bb_lower - atr * atr_mult
+
+        # 网格数量：根据波动率动态调整
+        # 高波动 → 少网格（间距大），低波动 → 多网格（间距小）
+        base_grids = params.get('base_grids', 10)
+        if vol_20 > 0.03:  # 高波动
+            n_grids = max(4, int(base_grids * 0.6))
+        elif vol_20 < 0.01:  # 低波动
+            n_grids = min(20, int(base_grids * 1.5))
+        else:
+            n_grids = base_grids
+
+        # 每格投资比例
+        invest_per_grid = params.get('invest_per_grid_pct', 10)
+
+        return {
+            'upper_bound': upper_bound,
+            'lower_bound': lower_bound,
+            'n_grids': n_grids,
+            'grid_spacing': (upper_bound - lower_bound) / n_grids,
+            'invest_per_grid_pct': invest_per_grid,
+            'volatility': round(vol_20, 4),
+            'atr': round(atr, 2),
+            'bb_width': round(bb_width, 4),
+            'trend': 'up' if is_uptrend else ('down' if is_downtrend else 'sideways'),
+        }
+
+    @staticmethod
+    def compute_grid_levels(price: float, params: Dict) -> List[Dict]:
+        """计算具体的网格挂单价位（供实盘使用）"""
+        upper = params.get('upper_bound', price * 1.05)
+        lower = params.get('lower_bound', price * 0.95)
+        n = params.get('n_grids', 10)
+        spacing = (upper - lower) / n
+
+        levels = []
+        for i in range(n + 1):
+            level_price = lower + spacing * i
+            levels.append({
+                'level': i,
+                'price': round(level_price, 2),
+                'type': 'buy' if level_price < price else 'sell',
+                'distance_pct': round((level_price / price - 1) * 100, 2),
+            })
+        return levels
+
+
+# ================================================================
+# 智能定投策略 (AI DCA)
+# ================================================================
+
+class SmartDCAStrategy:
+    """
+    智能定投策略 (AI Dollar Cost Averaging)
+
+    核心逻辑:
+    1. 基础定投：定期定额买入
+    2. AI 增强：根据技术指标动态调整每期投资额
+    3. 超跌加码：RSI 低位时加大买入权重
+    4. 高位减码：RSI 高位时减少买入甚至暂停
+    5. 波动率适应：高波动时分散更多期投入
+
+    投资权重计算:
+    weight = base_weight * rsi_factor * vol_factor * trend_factor
+    """
+
+    @staticmethod
+    def generate_signals(df: pd.DataFrame, params: Dict) -> List[Dict]:
+        if len(df) < 50:
+            return []
+
+        df = Indicators.add_all(df)
+        signals = []
+        curr = df.iloc[-1]
+        current_price = float(curr['close'])
+
+        # --- DCA 参数 ---
+        base_invest_pct = params.get('base_invest_pct', 5)  # 基础每期投资占总资金 %
+        interval_hours = params.get('interval_hours', 24)    # 定投间隔（小时）
+        last_buy_time = params.get('last_buy_time', 0)
+
+        # 检查是否到了定投时间
+        current_time = pd.Timestamp.now()
+        hours_since_last = (current_time - pd.Timestamp(last_buy_time, unit='s')).total_seconds() / 3600 if last_buy_time > 0 else interval_hours + 1
+
+        if hours_since_last < interval_hours:
+            return signals  # 未到定投时间
+
+        # --- AI 权重计算 ---
+        weight_info = SmartDCAStrategy._compute_weight(df, params)
+        final_weight = weight_info['final_weight']
+
+        if final_weight <= 0:
+            # 权重为 0 = 暂停定投（市场条件不适合）
+            return signals
+
+        # 生成买入信号
+        confidence = min(final_weight / base_invest_pct, 1.0) if base_invest_pct > 0 else 0.5
+
+        signals.append({
+            'type': 'buy',
+            'price': current_price,
+            'confidence': round(min(confidence, 0.9), 3),
+            'dca_info': {
+                'invest_pct': round(final_weight, 2),
+                'rsi': round(float(curr.get('rsi', 50)), 1),
+                'market_state': weight_info['market_state'],
+                'weight_breakdown': weight_info['breakdown'],
+                'next_interval_hours': interval_hours,
+            },
+        })
+
+        return signals
+
+    @staticmethod
+    def _compute_weight(df: pd.DataFrame, params: Dict) -> Dict:
+        """AI 计算本期投资权重"""
+        curr = df.iloc[-1]
+        close = df['close'].values
+        base_pct = params.get('base_invest_pct', 5)
+
+        # RSI 因子
+        rsi = float(curr.get('rsi', 50))
+        rsi_oversold = params.get('rsi_oversold', 30)
+        rsi_overbought = params.get('rsi_overbought', 70)
+
+        if rsi <= rsi_oversold:
+            # 极度超卖：最大加码 3x
+            rsi_factor = 1.0 + (rsi_oversold - rsi) / rsi_oversold * 2.0
+            rsi_label = 'oversold'
+        elif rsi >= rsi_overbought:
+            # 超买：减码到 0.3x
+            rsi_factor = max(0.1, 1.0 - (rsi - rsi_overbought) / (100 - rsi_overbought) * 0.9)
+            rsi_label = 'overbought'
+        else:
+            # 正常区间：轻微调整
+            rsi_factor = 1.0 - (rsi - 50) / 100 * 0.3
+            rsi_label = 'neutral'
+
+        # 波动率因子
+        vol_20 = float(pd.Series(close).pct_change().tail(20).std())
+        if np.isnan(vol_20):
+            vol_20 = 0.02
+        base_vol = params.get('base_volatility', 0.02)
+
+        if vol_20 > base_vol * 2:
+            # 高波动：减码（避免高位大量买入）
+            vol_factor = 0.5
+            vol_label = 'high'
+        elif vol_20 < base_vol * 0.5:
+            # 低波动：正常
+            vol_factor = 1.0
+            vol_label = 'low'
+        else:
+            vol_factor = 0.7 + 0.3 * (1 - vol_20 / (base_vol * 2))
+            vol_label = 'normal'
+
+        # 趋势因子
+        sma_20 = float(curr.get('sma_20', close[-1]))
+        sma_50 = float(curr.get('sma_50', close[-1]))
+        price = float(curr['close'])
+
+        if price > sma_20 > sma_50:
+            # 强势上涨：适当减码
+            trend_factor = 0.8
+            trend_label = 'strong_up'
+        elif price < sma_20 < sma_50:
+            # 弱势下跌：加码抄底
+            trend_factor = 1.3
+            trend_label = 'strong_down'
+        elif price < sma_50:
+            # 低于长期均线：加码
+            trend_factor = 1.1
+            trend_label = 'below_ma'
+        else:
+            trend_factor = 1.0
+            trend_label = 'neutral'
+
+        # 综合权重
+        final_weight = base_pct * rsi_factor * vol_factor * trend_factor
+        # 上限保护
+        max_pct = params.get('max_invest_pct', 15)
+        final_weight = min(final_weight, max_pct)
+
+        # 极端市场暂停
+        pause_threshold = params.get('pause_rsi', 85)
+        if rsi >= pause_threshold:
+            final_weight = 0
+            market_state = 'paused_overbought'
+        elif rsi <= 15:
+            # 极度超卖 + 强下跌趋势 = 可能继续跌，谨慎
+            if trend_label == 'strong_down':
+                final_weight *= 0.7
+            market_state = 'extreme_oversold'
+        else:
+            market_state = f'rsi_{rsi_label}_vol_{vol_vol if False else vol_label}'
+
+        return {
+            'final_weight': round(final_weight, 2),
+            'market_state': market_state,
+            'breakdown': {
+                'base': base_pct,
+                'rsi_factor': round(rsi_factor, 2),
+                'rsi_label': rsi_label,
+                'vol_factor': round(vol_factor, 2),
+                'vol_label': vol_label,
+                'trend_factor': round(trend_factor, 2),
+                'trend_label': trend_label,
+            },
+        }
+
+
+# ================================================================
 # 交易所客户端 — 含本地缓存
 # ================================================================
 
@@ -1265,6 +1610,65 @@ class BacktestEngine:
             except Exception as e:
                 logger.error(f"DL walk-forward error: {e}")
                 return buy, sell
+
+        elif strategy_type == 'ai_grid':
+            # 网格策略：基于布林带上下轨的向量化信号
+            close = df['close'].values
+            bb_u = df['bb_upper'].values
+            bb_l = df['bb_lower'].values
+            rsi = df['rsi'].values
+            sma20 = df['sma_20'].values
+            sma50 = df['sma_50'].values
+
+            for i in range(50, n):
+                if np.isnan(bb_u[i]) or np.isnan(rsi[i]):
+                    continue
+                price = close[i]
+                bb_range = bb_u[i] - bb_l[i]
+                if bb_range <= 0:
+                    continue
+                price_pos = (price - bb_l[i]) / bb_range
+
+                # 趋势加成
+                trend_boost = 0
+                if not np.isnan(sma20[i]) and not np.isnan(sma50[i]):
+                    if sma20[i] > sma50[i]:
+                        trend_boost = 0.05  # 上涨趋势向下限偏移
+                    else:
+                        trend_boost = -0.05
+
+                # RSI 加成
+                rsi_boost = 0
+                if rsi[i] < 30:
+                    rsi_boost = 0.1
+                elif rsi[i] > 70:
+                    rsi_boost = -0.1
+
+                if price_pos < 0.2 + rsi_boost + trend_boost:
+                    buy[i] = True
+                elif price_pos > 0.8 + rsi_boost + trend_boost:
+                    sell[i] = True
+
+        elif strategy_type == 'smart_dca':
+            # DCA 策略：基于 RSI 的加权买入
+            rsi = df['rsi'].values
+            close = df['close'].values
+            interval = params.get('interval_hours', 24)
+
+            for i in range(50, n):
+                if np.isnan(rsi[i]):
+                    continue
+                # 每 interval 小时买入一次
+                if i % interval == 0:
+                    # RSI 权重
+                    if rsi[i] < 25:
+                        buy[i] = True  # 极度超卖，重仓买入
+                    elif rsi[i] < 40:
+                        buy[i] = True  # 超卖，正常买入
+                    elif rsi[i] < 60:
+                        buy[i] = (i % (interval * 2) == 0)  # 正常，减频
+                    elif rsi[i] > 80:
+                        sell[i] = True  # 超买，卖出
 
         buy[:50] = False
         sell[:50] = False
