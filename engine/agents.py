@@ -14,8 +14,9 @@ Agent 团队：
 
 import json
 import logging
-import time
-import hashlib
+import socket
+import urllib.request
+import urllib.error
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -215,14 +216,6 @@ class NewsSentimentAgent(BaseAgent):
 
     def _fetch_news(self, symbol: str) -> List[Dict]:
         """从多个来源抓取加密货币新闻（带超时和容错）"""
-        import urllib.request
-        import urllib.error
-        import socket
-
-        # 全局超时设置
-        original_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(8)
-
         coin = symbol.split('/')[0] if '/' in symbol else symbol
         news_items = []
 
@@ -259,12 +252,9 @@ class NewsSentimentAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"CoinGecko status fetch failed: {e}")
 
-        # 来源 3: 兜底 - 使用 K 线数据做简单新闻替代分析
         if not news_items:
             logger.info("No news from external APIs, using market data sentiment proxy")
-            news_items = []  # 返回空，在 analyze 里处理
 
-        socket.setdefaulttimeout(original_timeout)
         return news_items
 
     def _sentiment_score(self, text: str) -> float:
@@ -443,12 +433,11 @@ class OnChainAgent(BaseAgent):
 
     def _fetch_funding_rate(self, symbol: str) -> Optional[float]:
         """获取 Binance 资金费率"""
-        import urllib.request
         try:
             coin = symbol.replace('/', '')
             url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={coin}&limit=1"
             req = urllib.request.Request(url, headers={'User-Agent': 'TradingPlatform/1.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
                 if data:
                     return float(data[-1]['fundingRate'])
@@ -458,12 +447,11 @@ class OnChainAgent(BaseAgent):
 
     def _fetch_oi(self, symbol: str) -> Optional[Dict]:
         """获取未平仓合约"""
-        import urllib.request
         try:
             coin = symbol.replace('/', '')
             url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={coin}"
             req = urllib.request.Request(url, headers={'User-Agent': 'TradingPlatform/1.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 return json.loads(resp.read())
         except Exception as e:
             logger.warning(f"OI fetch failed: {e}")
@@ -471,12 +459,11 @@ class OnChainAgent(BaseAgent):
 
     def _fetch_long_short_ratio(self, symbol: str) -> Optional[Dict]:
         """获取多空比"""
-        import urllib.request
         try:
             coin = symbol.replace('/', '')
             url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={coin}&period=1h&limit=1"
             req = urllib.request.Request(url, headers={'User-Agent': 'TradingPlatform/1.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read())
                 if data:
                     return data[-1]

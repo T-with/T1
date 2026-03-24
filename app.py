@@ -5,6 +5,7 @@ import json
 import uuid
 import logging
 import os
+import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
@@ -140,6 +141,13 @@ def api_get_exchange():
 @app.route('/api/exchange', methods=['POST'])
 def api_save_exchange():
     data = request.json
+    # 加载现有配置，只更新用户实际修改的字段
+    existing = load_exchange_raw()
+    for field in ('api_key', 'api_secret', 'passphrase'):
+        val = data.get(field, '')
+        # 如果前端传来的值包含 ****（脱敏标记），说明用户没有修改，保留原值
+        if val and '****' in val:
+            data[field] = existing.get(field, '')
     # 加密后存储
     encrypted = encrypt_exchange_config(data)
     EXCHANGE_FILE.write_text(json.dumps(encrypted, ensure_ascii=False, indent=2))
@@ -444,7 +452,6 @@ def api_agents_status():
 # 启动
 # ================================================================
 
-import pandas as pd
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)

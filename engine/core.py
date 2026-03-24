@@ -8,14 +8,13 @@ import time
 import logging
 import threading
 import hashlib
-import base64
 import os
 import pickle
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict, fields as dc_fields
+from dataclasses import dataclass, field, fields as dc_fields
 from typing import Optional, Dict, List, Any, Tuple
 from enum import Enum
 
@@ -846,7 +845,8 @@ class AIMultiFactorStrategy:
             '量价': [], '形态': [], '均值回归': [], '时间': [],
         }
         cat_prefix = {
-            'mom_': '动量', 'vol_': '波动率', 'vol_ratio': '波动率',
+            'mom_': '动量',
+            'vol_ratio_': '波动率', 'vol_5': '波动率', 'vol_10': '波动率', 'vol_20': '波动率', 'vol_60': '波动率',
             'rsi_': '技术指标', 'macd_': '技术指标', 'bb_': '技术指标', 'atr': '技术指标',
             'sma_dist': '趋势', 'ema_dist': '趋势',
             'vol_ratio': '量价', 'price_vol': '量价', 'obv_': '量价',
@@ -856,16 +856,18 @@ class AIMultiFactorStrategy:
         }
         for name, imp in factor_importance:
             assigned = False
-            for prefix, cat in cat_prefix.items():
+            # 按前缀长度降序匹配，避免短前缀误匹配
+            sorted_prefixes = sorted(cat_prefix.keys(), key=len, reverse=True)
+            for prefix in sorted_prefixes:
                 if name.startswith(prefix):
-                    categories[cat].append(imp)
+                    categories[cat_prefix[prefix]].append(imp)
                     assigned = True
                     break
             if not assigned:
                 # fallback: 检查包含关系
-                for prefix, cat in cat_prefix.items():
+                for prefix in sorted_prefixes:
                     if prefix in name:
-                        categories[cat].append(imp)
+                        categories[cat_prefix[prefix]].append(imp)
                         break
 
         return [
@@ -1238,6 +1240,9 @@ class LiveTrader:
         with self._lock:
             if sid in self._stop_events:
                 self._stop_events[sid].set()
+                del self._stop_events[sid]
+            if sid in self._threads:
+                del self._threads[sid]
             if sid in self._strategies:
                 self._strategies[sid]['config'].status = 'stopped'
 
@@ -1270,42 +1275,50 @@ class LiveTrader:
                 current_price = float(df.iloc[-1]['close'])
 
                 for sig in signals[-1:]:
-                    if sig['type'] == 'buy' and not state['positions']:
-                        # ✅ FIX: amount_usdt 始终计算（模拟盘也需要）
-                        amount_usdt = config.capital * config.position_size_pct / 100 * config.leverage
-
-                        if not config.paper and config.api_key:
-                            try:
-                                size = amount_usdt / current_price
-                                order = client.create_market_order(config.symbol, 'buy', size)
-                                logger.info(f"Order placed: {order}")
-                            except Exception as e:
-                                state['errors'].append(str(e))
-                                logger.error(f"Order failed: {e}")
-                                continue
-
-                        state['positions'][config.symbol] = {
-                            'side': 'long',
-                            'size': amount_usdt / current_price,
-                            'entry_price': current_price,
-                            'current_price': current_price,
-                            'opened_at': datetime.now().isoformat(),
-                        }
+                    if sig['type'] == 'buy':
+                        # 有空头仓位 → 平仓
+                        if config.symbol in state['positions'] and state['positions'][config.symbol]['side'] == 'short':
+                            pos = state['positions'].pop(config.symbol, {})
+                            pnl = (pos.get('entry_price', current_price) - current_price) * pos.get('size', 0)
+                            state['equity'] += pnl
+                            state['trades'].append({
+                                'type': 'close_short', 'price': current_price,
+                                'pnl': round(pnl, 2), 'time': datetime.now().isoformat(),
+                            })
+                        # 无仓位 → 开多
+                        if not state['positions']:
+                            amount_usdt = config.capital * config.position_size_pct / 100 * config.leverage
+                            if not config.paper and config.api_key:
+                                try:
+                                    size = amount_usdt / current_price
+                                    order = client.create_market_order(config.symbol, 'buy', size)
+                                    logger.info(f"Order placed: {order}")
+                                except Exception as e:
+                                    state['errors'].append(str(e))
+                                    if len(state['errors']) > 50:
+                                        state['errors'] = state['errors'][-50:]
+                                    logger.error(f"Order failed: {e}")
+                                    continue
+                            state['positions'][config.symbol] = {
+                                'side': 'long',
+                                'size': amount_usdt / current_price,
+                                'entry_price': current_price,
+                                'current_price': current_price,
+                                'opened_at': datetime.now().isoformat(),
+                            }
                         state['last_signal'] = 'buy'
-                        state['trades'].append({
-                            'type': 'open_long', 'price': current_price,
-                            'time': datetime.now().isoformat(),
-                        })
 
-                    elif sig['type'] == 'sell' and config.symbol in state['positions']:
-                        pos = state['positions'].pop(config.symbol, {})
-                        pnl = (current_price - pos.get('entry_price', current_price)) * pos.get('size', 0)
-                        state['equity'] += pnl
+                    elif sig['type'] == 'sell':
+                        # 有多头仓位 → 平仓
+                        if config.symbol in state['positions'] and state['positions'][config.symbol]['side'] == 'long':
+                            pos = state['positions'].pop(config.symbol, {})
+                            pnl = (current_price - pos.get('entry_price', current_price)) * pos.get('size', 0)
+                            state['equity'] += pnl
+                            state['trades'].append({
+                                'type': 'close_long', 'price': current_price,
+                                'pnl': round(pnl, 2), 'time': datetime.now().isoformat(),
+                            })
                         state['last_signal'] = 'sell'
-                        state['trades'].append({
-                            'type': 'close_long', 'price': current_price,
-                            'pnl': round(pnl, 2), 'time': datetime.now().isoformat(),
-                        })
 
                 # 风控检查
                 for sym in list(state['positions'].keys()):
@@ -1343,6 +1356,8 @@ class LiveTrader:
             except Exception as e:
                 logger.error(f"Strategy {sid} error: {e}")
                 state['errors'].append(f"{datetime.now():%H:%M:%S} {e}")
+                if len(state['errors']) > 50:
+                    state['errors'] = state['errors'][-50:]
 
             stop_event.wait(interval)
 
