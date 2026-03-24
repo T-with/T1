@@ -24,6 +24,7 @@ from engine.execution import (
 )
 from engine.risk import risk_manager, VolatilityEngine
 from engine.sentiment import sentiment_engine
+from engine.models import model_manager
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -783,6 +784,84 @@ def api_onchain(symbol):
         return jsonify(report)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ================================================================
+# API: 深度学习模型
+# ================================================================
+
+@app.route('/api/models/train', methods=['POST'])
+def api_model_train():
+    """训练 LSTM / Transformer 模型"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        model_type = data.get('model_type', 'lstm')
+        params = data.get('params', {})
+
+        if model_type not in ('lstm', 'transformer'):
+            return jsonify({'error': 'model_type must be lstm or transformer'}), 400
+
+        # 获取数据
+        client = ExchangeClient('binance')
+        limit = max(params.get('train_window', 1000), 800)
+        df = client.fetch_ohlcv(symbol, timeframe, limit=limit)
+
+        if df.empty or len(df) < 200:
+            return jsonify({'error': f'Insufficient data: {len(df)} bars'}), 400
+
+        result = model_manager.train(
+            df=df,
+            model_type=model_type,
+            symbol=symbol,
+            timeframe=timeframe,
+            seq_len=params.get('seq_len', 60),
+            epochs=params.get('epochs', 50),
+            batch_size=params.get('batch_size', 64),
+            lr=params.get('lr', 0.001),
+            target_return=params.get('target_return', 0.002),
+            **{k: v for k, v in params.items() if k not in
+               ('seq_len', 'epochs', 'batch_size', 'lr', 'target_return', 'train_window')}
+        )
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Model train error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/predict', methods=['POST'])
+def api_model_predict():
+    """使用训练好的模型预测"""
+    data = request.json or {}
+    try:
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        model_type = data.get('model_type', 'lstm')
+
+        client = ExchangeClient('binance')
+        df = client.fetch_ohlcv(symbol, timeframe, limit=200)
+
+        if df.empty:
+            return jsonify({'error': 'No data'}), 400
+
+        if model_type == 'ensemble':
+            result = model_manager.predict_both(df, symbol, timeframe)
+        else:
+            result = model_manager.predict(df, model_type, symbol, timeframe)
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Model predict error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/list', methods=['GET'])
+def api_model_list():
+    """列出所有已训练模型"""
+    return jsonify(model_manager.list_models())
 
 
 # ================================================================

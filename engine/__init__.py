@@ -24,3 +24,7 @@ from .sentiment import (
     OnChainMonitor, SentimentItem, SentimentSnapshot,
     sentiment_engine
 )
+from .models import (
+    ModelManager, LSTMPredictor, TransformerPredictor,
+    FeatureEngineer, model_manager
+)

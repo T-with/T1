@@ -264,6 +264,8 @@ class StrategyEngine:
         'bollinger_breakout': '布林带突破',
         'dual_ma': '双均线交叉',
         'ai_multi_factor': 'AI 多因子 (XGBoost)',
+        'lstm': 'LSTM 深度学习',
+        'transformer': 'Transformer 注意力',
     }
 
     @staticmethod
@@ -276,6 +278,8 @@ class StrategyEngine:
 
         if strategy_type == 'ai_multi_factor':
             return AIMultiFactorStrategy.generate_signals(df, params)
+        elif strategy_type in ('lstm', 'transformer'):
+            return StrategyEngine._dl_signal(df, strategy_type, params)
         elif strategy_type == 'macd_cross':
             return StrategyEngine._macd_cross(df, params)
         elif strategy_type == 'rsi_reversal':
@@ -349,6 +353,32 @@ class StrategyEngine:
             signals.append({'type': 'buy', 'price': curr['close'], 'confidence': 0.6})
         elif prev['ma_f'] >= prev['ma_s'] and curr['ma_f'] < curr['ma_s']:
             signals.append({'type': 'sell', 'price': curr['close'], 'confidence': 0.6})
+        return signals
+
+    @staticmethod
+    def _dl_signal(df, model_type, params):
+        """LSTM/Transformer 深度学习信号生成"""
+        signals = []
+        try:
+            from engine.models import model_manager
+            result = model_manager.predict(df, model_type)
+            if result.get('status') != 'ok':
+                return signals
+            curr = df.iloc[-1]
+            if result['signal'] == 'buy':
+                signals.append({
+                    'type': 'buy',
+                    'price': curr['close'],
+                    'confidence': result['confidence'] / 100,
+                })
+            elif result['signal'] == 'sell':
+                signals.append({
+                    'type': 'sell',
+                    'price': curr['close'],
+                    'confidence': result['confidence'] / 100,
+                })
+        except Exception as e:
+            logger.error(f"DL signal error ({model_type}): {e}")
         return signals
 
 
@@ -1190,6 +1220,22 @@ class BacktestEngine:
         elif strategy_type == 'ai_multi_factor':
             # AI 多因子使用 walk-forward 向量化信号
             return AIMultiFactorStrategy.vectorized_signals(df, params)
+
+        elif strategy_type in ('lstm', 'transformer'):
+            # 深度学习 walk-forward 向量化信号
+            try:
+                from engine.models import model_manager
+                return model_manager.walk_forward_signals(
+                    df, strategy_type,
+                    train_window=params.get('train_window', 500),
+                    retrain_interval=params.get('retrain_interval', 50),
+                    seq_len=params.get('seq_len', 60),
+                    epochs=params.get('epochs', 30),
+                    target_return=params.get('target_return', 0.002),
+                )
+            except Exception as e:
+                logger.error(f"DL walk-forward error: {e}")
+                return buy, sell
 
         buy[:50] = False
         sell[:50] = False
