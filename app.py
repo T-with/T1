@@ -72,7 +72,7 @@ DATA_DIR.mkdir(exist_ok=True)
 STRATEGIES_FILE = DATA_DIR / 'strategies.json'
 EXCHANGE_FILE = DATA_DIR / 'exchange.json'
 
-live_trader = LiveTrader()
+live_trader = LiveTrader(risk_mgr=risk_manager)
 
 
 def _make_exchange_client(exchange_id: str = None):

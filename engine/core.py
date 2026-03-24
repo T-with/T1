@@ -1201,14 +1201,32 @@ class BacktestEngine:
 # 实盘执行器
 # ================================================================
 
-class LiveTrader:
-    """实盘交易执行器 — 后台线程运行"""
+# ================================================================
+# 实盘执行器
+# ================================================================
 
-    def __init__(self):
+class LiveTrader:
+    """实盘交易执行器 -- 后台线程运行
+    Phase 4: 集成风控模块 (熔断/凯利/ATR追踪止损/波动率检测)
+    """
+
+    def __init__(self, risk_mgr=None):
         self._strategies: Dict[str, Dict] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._stop_events: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        # 风控管理器（可注入，不强制依赖）
+        self._risk = risk_mgr
+
+    def _get_risk(self):
+        """延迟加载风控管理器"""
+        if self._risk is None:
+            try:
+                from engine.risk import risk_manager
+                self._risk = risk_manager
+            except ImportError:
+                pass
+        return self._risk
 
     def start(self, config: StrategyConfig) -> bool:
         sid = config.id
@@ -1226,13 +1244,16 @@ class LiveTrader:
                 'last_signal': 'hold',
                 'last_update': datetime.now().isoformat(),
                 'errors': [],
+                'highest_price': 0.0,
+                'lowest_price': 0.0,
+                'peak_equity': config.capital,
             }
 
             t = threading.Thread(target=self._run_loop, args=(sid,), daemon=True)
             self._threads[sid] = t
             t.start()
 
-            logger.info(f"Strategy {config.name} started")
+            logger.info(f"Strategy {config.name} started (risk: {self._get_risk() is not None})")
             return True
 
     def stop(self, sid: str):
@@ -1251,6 +1272,50 @@ class LiveTrader:
     def get_all_status(self) -> Dict:
         return self._strategies
 
+    def _close_position(self, state: dict, config: StrategyConfig,
+                        client, current_price: float, reason: str):
+        """统一平仓逻辑: 更新权益 + 报告风控 + 下单"""
+        sym = config.symbol
+        if sym not in state['positions']:
+            return
+
+        pos = state['positions'].pop(sym)
+        side_multiplier = 1 if pos['side'] == 'long' else -1
+        pnl = (current_price - pos.get('entry_price', current_price)) * pos.get('size', 0) * side_multiplier
+        entry_val = pos.get('entry_price', 1) * pos.get('size', 1)
+        pnl_pct = (pnl / entry_val * 100) if entry_val > 0 else 0
+
+        state['equity'] += pnl
+        trade_record = {
+            'type': reason,
+            'side': pos['side'],
+            'entry_price': round(pos.get('entry_price', 0), 2),
+            'exit_price': round(current_price, 2),
+            'size': round(pos.get('size', 0), 6),
+            'pnl': round(pnl, 2),
+            'pnl_pct': round(pnl_pct, 2),
+            'time': datetime.now().isoformat(),
+        }
+        state['trades'].append(trade_record)
+
+        # 实盘下单
+        if not config.paper and config.api_key:
+            try:
+                close_side = 'sell' if pos['side'] == 'long' else 'buy'
+                client.create_market_order(config.symbol, close_side, pos['size'])
+                logger.info(f"Position closed: {sym} {reason} pnl={pnl:.2f}")
+            except Exception as e:
+                state['errors'].append(f"close order failed: {e}")
+                logger.error(f"Close order failed: {e}")
+
+        # 报告风控模块
+        risk = self._get_risk()
+        if risk:
+            risk.on_trade_result(config.id, pnl_pct)
+
+        logger.info(f"Strategy {config.id} closed {pos['side']} @ {current_price:.2f} "
+                    f"pnl={pnl:.2f} ({pnl_pct:.2f}%) reason={reason}")
+
     def _run_loop(self, sid: str):
         state = self._strategies[sid]
         config = state['config']
@@ -1265,30 +1330,77 @@ class LiveTrader:
                 client = ExchangeClient(
                     config.exchange_id, config.api_key, config.api_secret, config.passphrase
                 )
-                # 根据策略类型决定所需 K 线数量
                 min_bars = 600 if config.type == 'ai_multi_factor' else 200
                 df = client.fetch_ohlcv(config.symbol, config.timeframe, limit=min_bars)
                 if df.empty:
                     stop_event.wait(interval)
                     continue
 
-                signals = StrategyEngine.generate_signals(df, config.type, config.params)
                 current_price = float(df.iloc[-1]['close'])
+                risk = self._get_risk()
+
+                # ============================================================
+                # Phase 4-A: 市场环境风险检查 (波动率/闪崩检测)
+                # ============================================================
+                if risk:
+                    risk.update_equity(state['equity'])
+                    state['peak_equity'] = max(state['peak_equity'], state['equity'])
+
+                    market_risk = risk.check_market_conditions(
+                        df['close'].values, config.symbol
+                    )
+                    if market_risk.get('action') == 'halt_all':
+                        logger.warning(f"Market HALT: {config.symbol} level={market_risk['risk_level']}")
+                        for sym in list(state['positions'].keys()):
+                            self._close_position(state, config, client, current_price, 'market_halt')
+                        stop_event.wait(interval)
+                        continue
+
+                # ============================================================
+                # Phase 4-B: 熔断检查
+                # ============================================================
+                if risk:
+                    pos_check = risk.check_position(
+                        strategy_id=config.id,
+                        symbol=config.symbol,
+                        entry_price=0,
+                        current_price=current_price,
+                        highest_price=state.get('highest_price', current_price),
+                        lowest_price=state.get('lowest_price', current_price),
+                        side='long',
+                        equity=state['equity'],
+                        capital=config.capital,
+                    )
+                    action = pos_check.get('action', 'hold')
+                    if action == 'halt':
+                        for sym in list(state['positions'].keys()):
+                            self._close_position(state, config, client, current_price, 'risk_halt')
+                        stop_event.wait(min(interval, 60))
+                        continue
+                    if action == 'close':
+                        for sym in list(state['positions'].keys()):
+                            self._close_position(state, config, client, current_price, 'risk_close')
+                        continue
+
+                # ============================================================
+                # 生成信号
+                # ============================================================
+                signals = StrategyEngine.generate_signals(df, config.type, config.params)
 
                 for sig in signals[-1:]:
                     if sig['type'] == 'buy':
-                        # 有空头仓位 → 平仓
                         if config.symbol in state['positions'] and state['positions'][config.symbol]['side'] == 'short':
-                            pos = state['positions'].pop(config.symbol, {})
-                            pnl = (pos.get('entry_price', current_price) - current_price) * pos.get('size', 0)
-                            state['equity'] += pnl
-                            state['trades'].append({
-                                'type': 'close_short', 'price': current_price,
-                                'pnl': round(pnl, 2), 'time': datetime.now().isoformat(),
-                            })
-                        # 无仓位 → 开多
+                            self._close_position(state, config, client, current_price, 'signal_close_short')
+
                         if not state['positions']:
-                            amount_usdt = config.capital * config.position_size_pct / 100 * config.leverage
+                            # Phase 4-C: 凯利动态仓位
+                            position_pct = config.position_size_pct
+                            if risk:
+                                kelly = risk.kelly.calculate(config.id)
+                                position_pct = kelly.get('position_pct', position_pct)
+                                state['kelly_info'] = kelly
+
+                            amount_usdt = config.capital * position_pct / 100 * config.leverage
                             if not config.paper and config.api_key:
                                 try:
                                     size = amount_usdt / current_price
@@ -1307,50 +1419,74 @@ class LiveTrader:
                                 'current_price': current_price,
                                 'opened_at': datetime.now().isoformat(),
                             }
+                            state['highest_price'] = current_price
+                            state['lowest_price'] = current_price
+                            logger.info(f"Strategy {config.id} LONG size={amount_usdt:.2f} "
+                                       f"@ {current_price:.2f} pct={position_pct:.1f}%")
                         state['last_signal'] = 'buy'
 
                     elif sig['type'] == 'sell':
-                        # 有多头仓位 → 平仓
                         if config.symbol in state['positions'] and state['positions'][config.symbol]['side'] == 'long':
-                            pos = state['positions'].pop(config.symbol, {})
-                            pnl = (current_price - pos.get('entry_price', current_price)) * pos.get('size', 0)
-                            state['equity'] += pnl
-                            state['trades'].append({
-                                'type': 'close_long', 'price': current_price,
-                                'pnl': round(pnl, 2), 'time': datetime.now().isoformat(),
-                            })
+                            self._close_position(state, config, client, current_price, 'signal_close_long')
                         state['last_signal'] = 'sell'
 
-                # 风控检查
+                # ============================================================
+                # Phase 4-D: 高级持仓风控
+                # ============================================================
                 for sym in list(state['positions'].keys()):
                     pos = state['positions'][sym]
                     pos['current_price'] = current_price
+                    state['highest_price'] = max(state.get('highest_price', current_price), current_price)
+                    state['lowest_price'] = min(state.get('lowest_price', current_price), current_price)
+
                     pnl_pct = (current_price / pos['entry_price'] - 1) * 100
+                    if pos['side'] == 'short':
+                        pnl_pct = -pnl_pct
                     pos['pnl_pct'] = round(pnl_pct, 2)
 
-                    if pnl_pct <= -config.stop_loss_pct:
-                        if not config.paper and config.api_key:
-                            try:
-                                client.create_market_order(config.symbol, 'sell', pos['size'])
-                            except Exception:
-                                pass
-                        state['positions'].pop(sym)
-                        state['trades'].append({
-                            'type': 'stop_loss', 'price': current_price,
-                            'pnl_pct': round(pnl_pct, 2), 'time': datetime.now().isoformat(),
-                        })
+                    # ATR
+                    atr_val = 0
+                    if 'atr' in df.columns:
+                        atr_val = float(df['atr'].iloc[-1]) if pd.notna(df['atr'].iloc[-1]) else 0
 
-                    elif pnl_pct >= config.take_profit_pct:
-                        if not config.paper and config.api_key:
-                            try:
-                                client.create_market_order(config.symbol, 'sell', pos['size'])
-                            except Exception:
-                                pass
-                        state['positions'].pop(sym)
-                        state['trades'].append({
-                            'type': 'take_profit', 'price': current_price,
-                            'pnl_pct': round(pnl_pct, 2), 'time': datetime.now().isoformat(),
-                        })
+                    # 1) ATR 自适应追踪止损
+                    if risk and atr_val > 0:
+                        stop_result = risk.trailing_stop.check(
+                            entry_price=pos['entry_price'],
+                            current_price=current_price,
+                            highest_price=state['highest_price'],
+                            lowest_price=state['lowest_price'],
+                            side=pos['side'],
+                            atr=atr_val,
+                        )
+                        if stop_result.get('triggered'):
+                            self._close_position(state, config, client, current_price, 'atr_trailing_stop')
+                            continue
+
+                    # 2) 固定止损 (兜底)
+                    if pnl_pct <= -config.stop_loss_pct:
+                        self._close_position(state, config, client, current_price, 'stop_loss')
+                        continue
+
+                    # 3) 固定止盈
+                    if pnl_pct >= config.take_profit_pct:
+                        self._close_position(state, config, client, current_price, 'take_profit')
+                        continue
+
+                    # 4) 全局回撤检查
+                    if risk:
+                        peak = state['peak_equity']
+                        if peak > 0:
+                            dd = (peak - state['equity']) / peak * 100
+                            if dd >= config.max_drawdown_pct:
+                                logger.warning(f"Max drawdown {dd:.1f}%, closing all")
+                                self._close_position(state, config, client, current_price, 'max_drawdown')
+                                from engine.risk import RiskEventType
+                                risk._trigger_circuit_breaker(
+                                    f"Strategy {config.id} drawdown {dd:.1f}%",
+                                    RiskEventType.MAX_DRAWDOWN,
+                                )
+                                continue
 
                 state['last_update'] = datetime.now().isoformat()
 
