@@ -1,21 +1,63 @@
 """MyTradingPlatform Flask App"""
 from flask import Flask, render_template, jsonify, request
+from functools import wraps
 import json
 import uuid
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
 from engine.core import (
     StrategyConfig, ExchangeClient, BacktestEngine,
-    LiveTrader, Indicators, StrategyEngine
+    LiveTrader, Indicators, StrategyEngine,
+    filter_strategy_config, encrypt_exchange_config,
+    decrypt_exchange_config, redact_secrets,
+    decrypt_strategy_secrets,
 )
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 状态存储（生产环境应用数据库）
+# ================================================================
+# Basic Auth
+# ================================================================
+ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
+ADMIN_PASS = os.environ.get('ADMIN_PASS', 'changeme')
+
+def check_auth(username, password):
+    return username == ADMIN_USER and password == ADMIN_PASS
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return jsonify({'error': 'Unauthorized'}), 401, {
+                'WWW-Authenticate': 'Basic realm="MyTradingPlatform"'
+            }
+        return f(*args, **kwargs)
+    return decorated
+
+# 对所有非静态路由添加认证
+@app.before_request
+def auth_check():
+    # 放行静态资源（如果有）和健康检查
+    if request.endpoint and 'static' in request.endpoint:
+        return None
+    if request.path == '/health':
+        return None
+    auth = request.authorization
+    if not auth or not check_auth(auth.username, auth.password):
+        return jsonify({'error': 'Unauthorized'}), 401, {
+            'WWW-Authenticate': 'Basic realm="MyTradingPlatform"'
+        }
+
+
+# ================================================================
+# 数据存储
+# ================================================================
 DATA_DIR = Path(__file__).parent / 'data'
 DATA_DIR.mkdir(exist_ok=True)
 STRATEGIES_FILE = DATA_DIR / 'strategies.json'
@@ -34,11 +76,16 @@ def save_strategies(data: dict):
 
 def load_exchange() -> dict:
     if EXCHANGE_FILE.exists():
-        return json.loads(EXCHANGE_FILE.read_text())
+        raw = json.loads(EXCHANGE_FILE.read_text())
+        # 返回解密版本供内部使用
+        return decrypt_exchange_config(raw)
     return {}
 
-def save_exchange(data: dict):
-    EXCHANGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+def load_exchange_raw() -> dict:
+    """加载原始（含加密标记）的交易所配置"""
+    if EXCHANGE_FILE.exists():
+        return json.loads(EXCHANGE_FILE.read_text())
+    return {}
 
 
 # ================================================================
@@ -65,6 +112,10 @@ def live_page():
 def settings_page():
     return render_template('settings.html')
 
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok'})
+
 
 # ================================================================
 # API: 交易所配置
@@ -72,16 +123,22 @@ def settings_page():
 
 @app.route('/api/exchange', methods=['GET'])
 def api_get_exchange():
-    return jsonify(load_exchange())
+    raw = load_exchange_raw()
+    # 脱敏后返回给前端
+    return jsonify(redact_secrets(raw))
 
 @app.route('/api/exchange', methods=['POST'])
 def api_save_exchange():
     data = request.json
-    save_exchange(data)
+    # 加密后存储
+    encrypted = encrypt_exchange_config(data)
+    EXCHANGE_FILE.write_text(json.dumps(encrypted, ensure_ascii=False, indent=2))
+    logger.info("Exchange config saved (secrets encrypted)")
     return jsonify({'ok': True})
 
 @app.route('/api/exchange/test', methods=['POST'])
 def api_test_exchange():
+    """测试连接 — 前端提交的是明文，直接用"""
     data = request.json
     try:
         client = ExchangeClient(
@@ -103,7 +160,6 @@ def api_test_exchange():
 @app.route('/api/strategies', methods=['GET'])
 def api_list_strategies():
     strategies = load_strategies()
-    # 补充实盘状态
     for sid, s in strategies.items():
         status = live_trader.get_status(sid)
         if status:
@@ -144,6 +200,7 @@ def api_create_strategy():
 
     strategies[sid] = config.__dict__
     save_strategies(strategies)
+    logger.info(f"Strategy created: {sid} ({config.name})")
     return jsonify({'ok': True, 'id': sid})
 
 @app.route('/api/strategies/<sid>', methods=['DELETE'])
@@ -152,6 +209,7 @@ def api_delete_strategy(sid):
     strategies = load_strategies()
     strategies.pop(sid, None)
     save_strategies(strategies)
+    logger.info(f"Strategy deleted: {sid}")
     return jsonify({'ok': True})
 
 
@@ -209,19 +267,24 @@ def api_live_start(sid):
     if sid not in strategies:
         return jsonify({'error': 'Strategy not found'}), 404
 
-    s = strategies[sid]
-    exchange_cfg = load_exchange()
+    # ✅ FIX: 过滤合法字段，避免未知字段导致 TypeError
+    raw_config = filter_strategy_config(strategies[sid])
+    # ✅ FIX: 解密策略中存储的加密密钥
+    raw_config = decrypt_strategy_secrets(raw_config)
 
-    config = StrategyConfig(**s)
-    config.exchange_id = exchange_cfg.get('exchange_id', config.exchange_id)
-    config.api_key = exchange_cfg.get('api_key', config.api_key)
-    config.api_secret = exchange_cfg.get('api_secret', config.api_secret)
-    config.passphrase = exchange_cfg.get('passphrase', config.passphrase)
+    exchange_cfg = load_exchange()
+    raw_config['exchange_id'] = exchange_cfg.get('exchange_id', raw_config.get('exchange_id', 'binance'))
+    raw_config['api_key'] = exchange_cfg.get('api_key', raw_config.get('api_key', ''))
+    raw_config['api_secret'] = exchange_cfg.get('api_secret', raw_config.get('api_secret', ''))
+    raw_config['passphrase'] = exchange_cfg.get('passphrase', raw_config.get('passphrase', ''))
+
+    config = StrategyConfig(**raw_config)
 
     if live_trader.start(config):
         config.status = 'running'
         strategies[sid] = config.__dict__
         save_strategies(strategies)
+        logger.info(f"Strategy started: {sid} ({config.name})")
         return jsonify({'ok': True, 'message': f'Strategy {config.name} started'})
     else:
         return jsonify({'error': 'Already running'}), 400
@@ -233,6 +296,7 @@ def api_live_stop(sid):
     if sid in strategies:
         strategies[sid]['status'] = 'stopped'
         save_strategies(strategies)
+    logger.info(f"Strategy stopped: {sid}")
     return jsonify({'ok': True, 'message': 'Stopped'})
 
 @app.route('/api/live/status', methods=['GET'])

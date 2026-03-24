@@ -7,11 +7,15 @@ import json
 import time
 import logging
 import threading
+import hashlib
+import base64
+import os
+import pickle
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from typing import Optional, Dict, List, Any, Tuple
 from enum import Enum
 
@@ -20,6 +24,98 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / 'data'
 DATA_DIR.mkdir(exist_ok=True)
+
+# ================================================================
+# 日志文件
+# ================================================================
+log_file = BASE_DIR / 'logs' / 'platform.log'
+log_file.parent.mkdir(exist_ok=True)
+_file_handler = logging.FileHandler(log_file, encoding='utf-8')
+_file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+logging.getLogger().addHandler(_file_handler)
+
+
+# ================================================================
+# API 密钥加密
+# ================================================================
+_KEY_FILE = DATA_DIR / '.enc_key'
+
+def _get_encryption_key() -> bytes:
+    """加载或生成 Fernet 加密密钥"""
+    if _KEY_FILE.exists():
+        return _KEY_FILE.read_bytes()
+    # 生成新密钥（仅第一次）
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key()
+    _KEY_FILE.write_bytes(key)
+    os.chmod(_KEY_FILE, 0o600)
+    return key
+
+def encrypt_secret(plaintext: str) -> str:
+    """加密敏感字符串"""
+    if not plaintext:
+        return ''
+    from cryptography.fernet import Fernet
+    key = _get_encryption_key()
+    f = Fernet(key)
+    return f.encrypt(plaintext.encode()).decode()
+
+def decrypt_secret(ciphertext: str) -> str:
+    """解密敏感字符串"""
+    if not ciphertext:
+        return ''
+    from cryptography.fernet import Fernet
+    key = _get_encryption_key()
+    f = Fernet(key)
+    try:
+        return f.decrypt(ciphertext.encode()).decode()
+    except Exception:
+        # 兼容：如果解密失败，可能是旧的明文格式，直接返回
+        return ciphertext
+
+def encrypt_exchange_config(data: dict) -> dict:
+    """加密交易所配置中的敏感字段"""
+    data = dict(data)
+    for field in ('api_key', 'api_secret', 'passphrase'):
+        if data.get(field):
+            data[field] = f"enc:{encrypt_secret(data[field])}"
+    return data
+
+def decrypt_exchange_config(data: dict) -> dict:
+    """解密交易所配置中的敏感字段"""
+    data = dict(data)
+    for field in ('api_key', 'api_secret', 'passphrase'):
+        val = data.get(field, '')
+        if val.startswith('enc:'):
+            data[field] = decrypt_secret(val[4:])
+        # 否则保持原样（旧明文兼容）
+    return data
+
+def redact_secrets(data: dict) -> dict:
+    """脱敏 — 返回给前端时隐藏密钥"""
+    data = dict(data)
+    for field in ('api_key', 'api_secret', 'passphrase'):
+        val = data.get(field, '')
+        if val:
+            # 显示前4后4位
+            if val.startswith('enc:'):
+                raw = decrypt_secret(val[4:])
+            else:
+                raw = val
+            if len(raw) > 8:
+                data[field] = raw[:4] + '****' + raw[-4:]
+            else:
+                data[field] = '****'
+    return data
+
+def decrypt_strategy_secrets(config: dict) -> dict:
+    """解密策略配置中的敏感字段（用于实盘启动时）"""
+    config = dict(config)
+    for field in ('api_key', 'api_secret', 'passphrase'):
+        val = config.get(field, '')
+        if isinstance(val, str) and val.startswith('enc:'):
+            config[field] = decrypt_secret(val[4:])
+    return config
 
 
 # ================================================================
@@ -86,6 +182,13 @@ class StrategyConfig:
     passphrase: str = ""
     created_at: str = ""
     updated_at: str = ""
+
+# 延迟计算合法字段（dataclass 要求前向声明后才可用）
+_STRATEGY_FIELD_NAMES = {f.name for f in dc_fields(StrategyConfig)}
+
+def filter_strategy_config(data: dict) -> dict:
+    """过滤字典，只保留 StrategyConfig 的合法字段"""
+    return {k: v for k, v in data.items() if k in _STRATEGY_FIELD_NAMES}
 
 
 # ================================================================
@@ -252,9 +355,6 @@ class StrategyEngine:
 # 交易所客户端 — 含本地缓存
 # ================================================================
 
-import hashlib
-import pickle
-
 _CACHE_DIR = DATA_DIR / 'cache'
 _CACHE_DIR.mkdir(exist_ok=True)
 _CACHE_TTL = 300  # 5分钟缓存
@@ -283,14 +383,14 @@ class ExchangeClient:
             if age < _CACHE_TTL:
                 try:
                     return pickle.loads(path.read_bytes())
-                except:
+                except Exception:
                     pass
         return None
 
     def _write_cache(self, key, data):
         try:
             (_CACHE_DIR / f"{key}.pkl").write_bytes(pickle.dumps(data))
-        except:
+        except Exception:
             pass
 
     def fetch_ohlcv(self, symbol, timeframe='1h', limit=500):
@@ -336,7 +436,7 @@ class ExchangeClient:
         # 写入缓存
         try:
             df.to_csv(cache_file)
-        except:
+        except Exception:
             pass
         return df
 
@@ -349,7 +449,7 @@ class ExchangeClient:
     def fetch_positions(self, symbols=None):
         try:
             return self.exchange.fetch_positions(symbols)
-        except:
+        except Exception:
             return []
 
     @staticmethod
@@ -365,10 +465,6 @@ class ExchangeClient:
 class BacktestEngine:
     """
     向量化回测引擎
-    优化点：
-    1. 预计算全部信号（向量化），不再逐K线调用策略
-    2. 交易模拟用 numpy 数组操作
-    3. 减少 Python 对象创建
     """
 
     @staticmethod
@@ -377,20 +473,12 @@ class BacktestEngine:
             take_profit_pct=6, trailing_stop=True, trailing_pct=2):
         df = Indicators.add_all(df)
 
-        # === 向量化信号生成 ===
         buy_signals, sell_signals = BacktestEngine._vectorized_signals(
             df, strategy_type, params
         )
 
-        # === 向量化交易模拟 ===
         close = df['close'].values
         n = len(close)
-
-        # 状态数组
-        in_position = np.zeros(n, dtype=bool)
-        entry_prices = np.zeros(n)
-        position_sizes = np.zeros(n)
-        position_sides = np.zeros(n, dtype=int)  # 1=long, -1=short, 0=none
 
         cash = capital
         trades = []
@@ -420,15 +508,12 @@ class BacktestEngine:
                 should_exit = False
                 exit_reason = ''
 
-                # 止损
                 if pnl_pct <= -stop_loss_pct:
                     should_exit = True
                     exit_reason = 'stop_loss'
-                # 止盈
                 elif pnl_pct >= take_profit_pct:
                     should_exit = True
                     exit_reason = 'take_profit'
-                # 追踪止损
                 elif trailing_stop and pnl_pct > 0:
                     if pos_side == 1:
                         pullback = (pos_highest - price) / pos_highest * 100
@@ -494,7 +579,6 @@ class BacktestEngine:
                 })
                 has_pos = False
 
-            # 权益
             eq = cash
             if has_pos:
                 eq += (price - pos_entry) * pos_size * pos_side
@@ -503,7 +587,6 @@ class BacktestEngine:
             dd = (max_equity - eq) / max_equity * 100 if max_equity > 0 else 0
             max_dd = max(max_dd, dd)
 
-        # 统计
         wins = [t for t in trades if t.get('pnl', 0) > 0]
         losses = [t for t in trades if t.get('pnl', 0) <= 0]
         total_profit = sum(t['pnl'] for t in wins) if wins else 0
@@ -549,9 +632,7 @@ class BacktestEngine:
         if strategy_type == 'macd_cross':
             macd = df['macd'].values
             sig = df['macd_signal'].values
-            # 金叉：前一根 MACD<=Signal, 当前 MACD>Signal
             buy[1:] = (macd[:-1] <= sig[:-1]) & (macd[1:] > sig[1:])
-            # 死叉
             sell[1:] = (macd[:-1] >= sig[:-1]) & (macd[1:] < sig[1:])
 
         elif strategy_type == 'rsi_reversal':
@@ -581,7 +662,6 @@ class BacktestEngine:
             buy[1:] = (fast_ma[:-1] <= slow_ma[:-1]) & (fast_ma[1:] > slow_ma[1:])
             sell[1:] = (fast_ma[:-1] >= slow_ma[:-1]) & (fast_ma[1:] < slow_ma[1:])
 
-        # 过滤掉前50根（指标未稳定）
         buy[:50] = False
         sell[:50] = False
 
@@ -663,9 +743,11 @@ class LiveTrader:
 
                 for sig in signals[-1:]:
                     if sig['type'] == 'buy' and not state['positions']:
+                        # ✅ FIX: amount_usdt 始终计算（模拟盘也需要）
+                        amount_usdt = config.capital * config.position_size_pct / 100 * config.leverage
+
                         if not config.paper and config.api_key:
                             try:
-                                amount_usdt = config.capital * config.position_size_pct / 100 * config.leverage
                                 size = amount_usdt / current_price
                                 order = client.create_market_order(config.symbol, 'buy', size)
                                 logger.info(f"Order placed: {order}")
@@ -675,8 +757,10 @@ class LiveTrader:
                                 continue
 
                         state['positions'][config.symbol] = {
-                            'side': 'long', 'size': amount_usdt / current_price,
-                            'entry_price': current_price, 'current_price': current_price,
+                            'side': 'long',
+                            'size': amount_usdt / current_price,
+                            'entry_price': current_price,
+                            'current_price': current_price,
                             'opened_at': datetime.now().isoformat(),
                         }
                         state['last_signal'] = 'buy'
@@ -706,7 +790,7 @@ class LiveTrader:
                         if not config.paper and config.api_key:
                             try:
                                 client.create_market_order(config.symbol, 'sell', pos['size'])
-                            except:
+                            except Exception:
                                 pass
                         state['positions'].pop(sym)
                         state['trades'].append({
@@ -718,7 +802,7 @@ class LiveTrader:
                         if not config.paper and config.api_key:
                             try:
                                 client.create_market_order(config.symbol, 'sell', pos['size'])
-                            except:
+                            except Exception:
                                 pass
                         state['positions'].pop(sym)
                         state['trades'].append({

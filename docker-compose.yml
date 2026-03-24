@@ -10,3 +10,5 @@ services:
       - ./logs:/app/logs
     environment:
       - TZ=Asia/Shanghai
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-changeme}
