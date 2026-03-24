@@ -4,7 +4,7 @@
 {% block head %}
 <style>
     .gauge-container { position: relative; width: 220px; height: 130px; margin: 0 auto; }
-    .gauge-bg { fill: none; stroke: #30363d; stroke-width: 18; }
+    .gauge-bg { fill: none; stroke: #dee2e6; stroke-width: 18; }
     .gauge-fill { fill: none; stroke-width: 18; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
     .gauge-text { font-size: 2rem; font-weight: 700; }
     .gauge-label { font-size: 0.8rem; fill: var(--text-dim); }
@@ -226,9 +226,9 @@ const factorLabels = {
 };
 
 const catColors = {
-    '动量': '#58a6ff', '波动率': '#d29922', '技术指标': '#bc8cff',
+    '动量': '#0d6efd', '波动率': '#d29922', '技术指标': '#6f42c1',
     '趋势': '#3fb950', '量价': '#f85149', '形态': '#79c0ff',
-    '均值回归': '#d2a8ff', '时间': '#8b949e',
+    '均值回归': '#a855f7', '时间': '#6c757d',
 };
 
 function getFactorLabel(name) {
@@ -360,7 +360,7 @@ function renderFactors(f) {
     const cats = f.categories;
     const labels = cats.map(c => c.name);
     const values = cats.map(c => c.avg_importance);
-    const colors = labels.map(l => catColors[l] || '#8b949e');
+    const colors = labels.map(l => catColors[l] || '#6c757d');
 
     catChart = new Chart(document.getElementById('category-chart'), {
         type: 'doughnut',
@@ -373,7 +373,7 @@ function renderFactors(f) {
             plugins: {
                 legend: {
                     position: 'bottom',
-                    labels: { color: '#8b949e', padding: 12, font: { size: 11 } },
+                    labels: { color: '#6c757d', padding: 12, font: { size: 11 } },
                 },
             },
         },
@@ -381,7 +381,7 @@ function renderFactors(f) {
 
     // 类别标签
     document.getElementById('category-pills').innerHTML = cats.map(c => {
-        const color = catColors[c.name] || '#8b949e';
+        const color = catColors[c.name] || '#6c757d';
         return `<span class="category-pill" style="background:${color}22;color:${color};">${c.name} (${c.count})</span>`;
     }).join('');
 }
@@ -403,7 +403,7 @@ function renderHistory(hist) {
                 {
                     label: '买入概率 %',
                     data: probs,
-                    borderColor: '#bc8cff',
+                    borderColor: '#6f42c1',
                     backgroundColor: 'rgba(188,140,255,0.1)',
                     borderWidth: 2,
                     pointRadius: 2,
@@ -413,7 +413,7 @@ function renderHistory(hist) {
                 {
                     label: '价格',
                     data: prices,
-                    borderColor: '#58a6ff',
+                    borderColor: '#0d6efd',
                     borderWidth: 1.5,
                     pointRadius: 0,
                     borderDash: [4, 4],
@@ -433,18 +433,18 @@ function renderHistory(hist) {
         options: {
             responsive: true,
             interaction: { mode: 'index', intersect: false },
-            plugins: { legend: { labels: { color: '#8b949e' } } },
+            plugins: { legend: { labels: { color: '#6c757d' } } },
             scales: {
-                x: { ticks: { color: '#8b949e', maxTicksLimit: 10 }, grid: { color: '#30363d' } },
+                x: { ticks: { color: '#6c757d', maxTicksLimit: 10 }, grid: { color: '#dee2e6' } },
                 y: {
                     position: 'left', min: 0, max: 100,
-                    ticks: { color: '#bc8cff' }, grid: { color: '#30363d' },
-                    title: { display: true, text: '概率 %', color: '#bc8cff' },
+                    ticks: { color: '#6f42c1' }, grid: { color: '#dee2e6' },
+                    title: { display: true, text: '概率 %', color: '#6f42c1' },
                 },
                 y1: {
                     position: 'right',
-                    ticks: { color: '#58a6ff' }, grid: { display: false },
-                    title: { display: true, text: '价格', color: '#58a6ff' },
+                    ticks: { color: '#0d6efd' }, grid: { display: false },
+                    title: { display: true, text: '价格', color: '#0d6efd' },
                 },
             },
         },

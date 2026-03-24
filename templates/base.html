@@ -8,21 +8,23 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         :root {
-            --bg-dark: #0d1117;
-            --bg-card: #161b22;
-            --bg-hover: #1c2333;
-            --border: #30363d;
-            --text: #e6edf3;
-            --text-dim: #8b949e;
-            --green: #3fb950;
-            --red: #f85149;
-            --blue: #58a6ff;
-            --yellow: #d29922;
-            --purple: #bc8cff;
+            --bg-dark: #ffffff;
+            --bg-card: #f8f9fa;
+            --bg-hover: #e9ecef;
+            --border: #dee2e6;
+            --text: #212529;
+            --text-dim: #6c757d;
+            --green: #198754;
+            --red: #dc3545;
+            --blue: #0d6efd;
+            --yellow: #ffc107;
+            --purple: #6f42c1;
         }
         body { background: var(--bg-dark); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
         .navbar { background: var(--bg-card) !important; border-bottom: 1px solid var(--border); }
-        .navbar-brand { font-weight: 700; font-size: 1.3rem; }
+        .navbar-brand { font-weight: 700; font-size: 1.3rem; color: var(--text) !important; }
+        .navbar-dark .navbar-brand, .navbar-dark .navbar-nav .nav-link { color: var(--text) !important; }
+        .navbar-dark .navbar-toggler-icon { filter: invert(1); }
         .nav-link { color: var(--text-dim) !important; transition: color 0.2s; }
         .nav-link:hover, .nav-link.active { color: var(--text) !important; }
         .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; }
@@ -37,16 +39,17 @@
         .table { color: var(--text); }
         .table th { border-color: var(--border); color: var(--text-dim); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
         .table td { border-color: var(--border); vertical-align: middle; }
-        .form-control, .form-select { background: var(--bg-dark); border-color: var(--border); color: var(--text); }
-        .form-control:focus, .form-select:focus { background: var(--bg-dark); border-color: var(--blue); color: var(--text); box-shadow: 0 0 0 2px rgba(88,166,255,0.2); }
+        .table-hover tbody tr:hover { background-color: var(--bg-hover); }
+        .form-control, .form-select { background: #fff; border-color: var(--border); color: var(--text); }
+        .form-control:focus, .form-select:focus { background: #fff; border-color: var(--blue); color: var(--text); box-shadow: 0 0 0 2px rgba(13,110,253,0.15); }
         .form-label { color: var(--text-dim); font-size: 0.85rem; }
-        .badge-running { background: var(--green); color: #000; }
-        .badge-stopped { background: var(--text-dim); }
-        .badge-error { background: var(--red); }
+        .badge-running { background: var(--green); color: #fff; }
+        .badge-stopped { background: var(--text-dim); color: #fff; }
+        .badge-error { background: var(--red); color: #fff; }
         .sidebar { min-height: calc(100vh - 56px); border-right: 1px solid var(--border); }
         .sidebar .nav-link { padding: 0.7rem 1rem; border-radius: 8px; margin: 2px 8px; }
         .sidebar .nav-link:hover { background: var(--bg-hover); }
-        .sidebar .nav-link.active { background: rgba(88,166,255,0.15); color: var(--blue) !important; }
+        .sidebar .nav-link.active { background: rgba(13,110,253,0.1); color: var(--blue) !important; }
         .position-card { border-left: 3px solid var(--green); }
         .position-card.short { border-left-color: var(--red); }
         .loading { text-align: center; padding: 3rem; color: var(--text-dim); }
@@ -57,7 +60,7 @@
     {% block head %}{% endblock %}
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark">
+    <nav class="navbar navbar-expand-lg navbar-light">
         <div class="container-fluid">
             <a class="navbar-brand" href="/">
                 <i class="bi bi-graph-up-arrow"></i> MyTradingPlatform
