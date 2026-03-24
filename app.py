@@ -18,6 +18,12 @@ from engine.core import (
     AIMultiFactorStrategy,
 )
 from engine.agents import orchestrator
+from engine.data import data_manager
+from engine.execution import (
+    SmartOrderRouter, OrderRequest, OrderType, SlippageEstimator
+)
+from engine.risk import risk_manager, VolatilityEngine
+from engine.sentiment import sentiment_engine
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -67,6 +73,20 @@ STRATEGIES_FILE = DATA_DIR / 'strategies.json'
 EXCHANGE_FILE = DATA_DIR / 'exchange.json'
 
 live_trader = LiveTrader()
+
+
+def _make_exchange_client(exchange_id: str = None):
+    """工厂函数：创建 ExchangeClient（供 SmartOrderRouter 使用）"""
+    cfg = load_exchange()
+    return ExchangeClient(
+        exchange_id or cfg.get('exchange_id', 'binance'),
+        cfg.get('api_key', ''),
+        cfg.get('api_secret', ''),
+        cfg.get('passphrase', ''),
+    )
+
+
+order_router = SmartOrderRouter(_make_exchange_client, data_manager)
 
 
 def load_strategies() -> dict:
@@ -453,6 +473,316 @@ def api_agents_status():
         status['exchange_error'] = str(e)
 
     return jsonify(status)
+
+
+# ================================================================
+# API: 实时数据层
+# ================================================================
+
+@app.route('/api/data/market-snapshot/<symbol>', methods=['GET'])
+def api_market_snapshot(symbol):
+    """获取交易对完整市场快照（K线+OrderBook+成交统计）"""
+    try:
+        exchange_id = request.args.get('exchange', 'binance')
+        symbol_fmt = symbol.replace('_', '/')
+        # 确保数据源已订阅
+        data_manager.subscribe_symbol(exchange_id, symbol_fmt, '1h', ['kline', 'orderbook', 'trades'])
+        import time; time.sleep(1)  # 等待首帧数据
+        snapshot = data_manager.get_market_snapshot(exchange_id, symbol_fmt)
+        return jsonify(snapshot)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/orderbook/<symbol>', methods=['GET'])
+def api_orderbook(symbol):
+    """获取 OrderBook 深度"""
+    try:
+        exchange_id = request.args.get('exchange', 'binance')
+        symbol_fmt = symbol.replace('_', '/')
+        ob = data_manager.get_orderbook(exchange_id, symbol_fmt)
+        if ob is None:
+            return jsonify({'error': 'OrderBook not available'}), 404
+        return jsonify({
+            'symbol': symbol_fmt,
+            'exchange': exchange_id,
+            'bids': [{'price': lv.price, 'amount': lv.amount} for lv in ob.bids[:20]],
+            'asks': [{'price': lv.price, 'amount': lv.amount} for lv in ob.asks[:20]],
+            'spread': round(ob.spread, 8),
+            'spread_pct': round(ob.spread_pct, 4),
+            'mid_price': round(ob.mid_price, 2),
+            'imbalance': round(ob.imbalance_ratio(10), 3),
+            'timestamp': ob.timestamp,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/trades/<symbol>', methods=['GET'])
+def api_trade_stats(symbol):
+    """获取逐笔成交统计"""
+    try:
+        exchange_id = request.args.get('exchange', 'binance')
+        symbol_fmt = symbol.replace('_', '/')
+        stats = data_manager.get_trade_stats(exchange_id, symbol_fmt)
+        if stats is None:
+            return jsonify({'error': 'Trade data not available'}), 404
+        feed = data_manager.get_feed(exchange_id)
+        whales = []
+        if feed:
+            whales = feed.trades.detect_whale_activity(exchange_id, symbol_fmt)
+        return jsonify({
+            'symbol': symbol_fmt,
+            'stats': {k: round(v, 4) if isinstance(v, float) else v for k, v in stats.items()},
+            'whale_alerts': whales[:10],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/status', methods=['GET'])
+def api_data_status():
+    """获取所有数据源连接状态"""
+    return jsonify(data_manager.get_all_status())
+
+
+@app.route('/api/data/subscribe', methods=['POST'])
+def api_data_subscribe():
+    """订阅交易对数据流"""
+    data = request.json or {}
+    exchange_id = data.get('exchange', 'binance')
+    symbol = data.get('symbol', 'BTC/USDT')
+    timeframe = data.get('timeframe', '1h')
+    streams = data.get('streams', ['kline', 'orderbook', 'trades'])
+    try:
+        data_manager.subscribe_symbol(exchange_id, symbol, timeframe, streams)
+        return jsonify({'ok': True, 'message': f'Subscribed {symbol} on {exchange_id}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ================================================================
+# API: 智能订单执行
+# ================================================================
+
+@app.route('/api/execute/order', methods=['POST'])
+def api_execute_order():
+    """智能订单执行（支持市价/TWAP/VWAP）"""
+    data = request.json or {}
+    try:
+        order = OrderRequest(
+            id=str(uuid.uuid4())[:8],
+            symbol=data.get('symbol', 'BTC/USDT'),
+            exchange=data.get('exchange', 'binance'),
+            side=data.get('side', 'buy'),
+            type=OrderType(data.get('type', 'market')),
+            total_amount=float(data.get('amount', 0)),
+            price=float(data.get('price', 0)),
+            twap_duration_sec=int(data.get('twap_duration', 60)),
+            twap_slices=int(data.get('twap_slices', 10)),
+            vwap_window=int(data.get('vwap_window', 20)),
+            max_slippage_pct=float(data.get('max_slippage', 0.5)),
+            strategy_id=data.get('strategy_id', ''),
+        )
+
+        if order.total_amount <= 0:
+            return jsonify({'error': 'Amount must be > 0'}), 400
+
+        result = order_router.route_order(order)
+        return jsonify({
+            'order_id': result.order_id,
+            'status': result.status.value,
+            'filled_amount': result.filled_amount,
+            'avg_price': round(result.avg_price, 2),
+            'total_cost': round(result.total_cost, 2),
+            'slippage_pct': round(result.slippage_pct, 4),
+            'duration_sec': round(result.duration_sec, 2),
+            'fills': len(result.fills),
+        })
+    except Exception as e:
+        logger.error(f"Execute order error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/execute/slippage-estimate', methods=['POST'])
+def api_slippage_estimate():
+    """预估滑点"""
+    data = request.json or {}
+    try:
+        exchange_id = data.get('exchange', 'binance')
+        symbol = data.get('symbol', 'BTC/USDT')
+        side = data.get('side', 'buy')
+        amount = float(data.get('amount', 0))
+
+        ob = data_manager.get_orderbook(exchange_id, symbol)
+        if ob is None:
+            # fallback: 从 REST 获取
+            client = ExchangeClient(exchange_id)
+            raw = client.exchange.fetch_order_book(symbol, 20)
+            data_manager.get_feed(exchange_id).orderbook.update_snapshot(
+                exchange_id, symbol, raw.get('bids', []), raw.get('asks', [])
+            )
+            ob = data_manager.get_orderbook(exchange_id, symbol)
+
+        estimate = SlippageEstimator.estimate(ob, side, amount)
+        return jsonify(estimate)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/execute/stats', methods=['GET'])
+def api_execute_stats():
+    """获取执行层统计"""
+    return jsonify(order_router.get_stats())
+
+
+# ================================================================
+# API: 风险管理
+# ================================================================
+
+@app.route('/api/risk/dashboard', methods=['GET'])
+def api_risk_dashboard():
+    """风控仪表盘"""
+    return jsonify(risk_manager.get_risk_dashboard())
+
+
+@app.route('/api/risk/check-position', methods=['POST'])
+def api_risk_check_position():
+    """检查仓位风险"""
+    data = request.json or {}
+    try:
+        result = risk_manager.check_position(
+            strategy_id=data.get('strategy_id', ''),
+            symbol=data.get('symbol', ''),
+            entry_price=float(data.get('entry_price', 0)),
+            current_price=float(data.get('current_price', 0)),
+            highest_price=float(data.get('highest_price', 0)),
+            lowest_price=float(data.get('lowest_price', 0)),
+            side=data.get('side', 'long'),
+            atr=float(data.get('atr', 0)),
+            equity=float(data.get('equity', 0)),
+            capital=float(data.get('capital', 0)),
+        )
+        # 转换 RiskEvent 为可序列化格式
+        result['events'] = [
+            {'type': e.type.value, 'level': e.level.value, 'message': e.message}
+            for e in result.get('events', [])
+        ]
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/risk/volatility/<symbol>', methods=['GET'])
+def api_risk_volatility(symbol):
+    """波动率分析"""
+    try:
+        timeframe = request.args.get('timeframe', '1h')
+        exchange_id = request.args.get('exchange', 'binance')
+        symbol_fmt = symbol.replace('_', '/')
+
+        client = ExchangeClient(exchange_id)
+        df = client.fetch_ohlcv(symbol_fmt, timeframe, limit=100)
+        if df.empty:
+            return jsonify({'error': 'No data'}), 400
+
+        prices = df['close'].values
+        vol_engine = VolatilityEngine()
+
+        result = {
+            'symbol': symbol_fmt,
+            'current_price': round(float(prices[-1]), 2),
+            'volatility': {
+                'historical_20': round(vol_engine.historical_volatility(prices, 20), 4),
+                'historical_60': round(vol_engine.historical_volatility(prices, 60), 4),
+                'ewma_20': round(vol_engine.ewma_volatility(prices, 20), 4),
+                'parkinson_20': round(vol_engine.parkinson_volatility(df, 20), 4),
+            },
+            'regime': vol_engine.implied_regime(prices),
+            'spike_detection': vol_engine.detect_volatility_spike(prices),
+        }
+
+        # 市场风险检查
+        market_risk = risk_manager.check_market_conditions(prices, symbol_fmt)
+        result['risk_level'] = market_risk['risk_level']
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/risk/kelly/<strategy_id>', methods=['GET'])
+def api_risk_kelly(strategy_id):
+    """凯利公式仓位建议"""
+    try:
+        result = risk_manager.kelly.calculate(strategy_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/risk/circuit-breaker/release', methods=['POST'])
+def api_risk_release_breaker():
+    """手动解除熔断"""
+    risk_manager.release_circuit_breaker()
+    return jsonify({'ok': True, 'message': 'Circuit breaker released'})
+
+
+@app.route('/api/risk/resume/<strategy_id>', methods=['POST'])
+def api_risk_resume_strategy(strategy_id):
+    """手动恢复被暂停的策略"""
+    risk_manager.resume_strategy(strategy_id)
+    return jsonify({'ok': True, 'message': f'Strategy {strategy_id} resumed'})
+
+
+# ================================================================
+# API: 情绪分析
+# ================================================================
+
+@app.route('/api/sentiment/<symbol>', methods=['GET'])
+def api_sentiment(symbol):
+    """获取市场情绪指数"""
+    try:
+        symbol_fmt = symbol.replace('_', '/')
+        index = sentiment_engine.get_sentiment_index(symbol_fmt)
+        return jsonify(index)
+    except Exception as e:
+        logger.error(f"Sentiment error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sentiment/<symbol>/detail', methods=['GET'])
+def api_sentiment_detail(symbol):
+    """获取完整情绪分析报告"""
+    try:
+        symbol_fmt = symbol.replace('_', '/')
+        snapshot = sentiment_engine.analyze(symbol_fmt)
+        return jsonify({
+            'symbol': snapshot.symbol,
+            'overall_score': round(snapshot.overall_score, 3),
+            'overall_label': snapshot.overall_label,
+            'news_score': round(snapshot.news_score, 3),
+            'social_score': round(snapshot.social_score, 3),
+            'onchain_score': round(snapshot.onchain_score, 3),
+            'item_count': snapshot.item_count,
+            'top_positive': snapshot.top_positive,
+            'top_negative': snapshot.top_negative,
+            'trend_1h': round(snapshot.trend_1h, 3),
+            'trend_24h': round(snapshot.trend_24h, 3),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sentiment/<symbol>/onchain', methods=['GET'])
+def api_onchain(symbol):
+    """获取链上数据"""
+    try:
+        symbol_fmt = symbol.replace('_', '/')
+        report = sentiment_engine.onchain.get_full_report(symbol_fmt)
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ================================================================
