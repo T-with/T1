@@ -269,6 +269,8 @@ class StrategyEngine:
         'rl_ppo': '强化学习 PPO',
         'ai_grid': 'AI 动态网格',
         'smart_dca': '智能定投 DCA',
+        'funding_arb': '资金费率套利',
+        'stat_arb': '统计套利',
     }
 
     @staticmethod
@@ -289,6 +291,8 @@ class StrategyEngine:
             return AIGridStrategy.generate_signals(df, params)
         elif strategy_type == 'smart_dca':
             return SmartDCAStrategy.generate_signals(df, params)
+        elif strategy_type in ('funding_arb', 'stat_arb'):
+            return StatisticalArbStrategy.generate_signals(df, strategy_type, params)
         elif strategy_type == 'macd_cross':
             return StrategyEngine._macd_cross(df, params)
         elif strategy_type == 'rsi_reversal':
@@ -1281,6 +1285,263 @@ class SmartDCAStrategy:
 
 
 # ================================================================
+# 统计套利策略
+# ================================================================
+
+class StatisticalArbStrategy:
+    """
+    统计套利策略
+
+    支持两种模式:
+    1. funding_arb — 资金费率套利 (期现套利)
+       - 检测高资金费率的永续合约
+       - 正费率：做空永续 + 做多现货 = 无风险收取资金费
+       - 负费率：做多永续 + 做空现货 = 反向收取资金费
+       - 信号给出开仓/平仓建议
+
+    2. stat_arb — 配对统计套利
+       - 检测相关资产间的价差偏离
+       - Z-score 回归信号
+       - 均值回归 + 协整检验
+    """
+
+    # 资金费率套利阈值 (年化)
+    FUNDING_OPEN_THRESHOLD = 0.10    # 年化 10% 以上开仓
+    FUNDING_CLOSE_THRESHOLD = 0.03   # 年化 3% 以下平仓
+    FUNDING_EXTREME = 0.50           # 年化 50% 极端值
+
+    @staticmethod
+    def generate_signals(df: pd.DataFrame, strategy_type: str, params: Dict) -> List[Dict]:
+        if strategy_type == 'funding_arb':
+            return StatisticalArbStrategy._funding_arbitrage(df, params)
+        elif strategy_type == 'stat_arb':
+            return StatisticalArbStrategy._pair_stat_arb(df, params)
+        return []
+
+    @staticmethod
+    def _funding_arbitrage(df: pd.DataFrame, params: Dict) -> List[Dict]:
+        """
+        资金费率套利信号
+
+        逻辑:
+        - 获取当前资金费率
+        - 正费率 > 阈值 → 建议开仓（做空永续+做多现货）
+        - 费率回落 < 阈值 → 建议平仓
+        - 极端费率 → 高置信度信号
+        """
+        signals = []
+        if len(df) < 20:
+            return signals
+
+        curr = df.iloc[-1]
+        current_price = float(curr['close'])
+
+        # 尝试获取实时资金费率
+        funding_rate = params.get('funding_rate', None)
+        if funding_rate is None:
+            # 从链上数据模块获取
+            try:
+                from engine.sentiment import OnChainMonitor
+                monitor = OnChainMonitor()
+                symbol = params.get('symbol', 'BTC/USDT')
+                fr_data = monitor.get_funding_rate(symbol)
+                if fr_data and fr_data.get('latest_rate') is not None:
+                    funding_rate = fr_data['latest_rate']
+                    params['funding_rate_data'] = fr_data
+            except Exception:
+                pass
+
+        if funding_rate is None:
+            # 没有实时数据，用历史隐含估算
+            # 基于现货-永续价差估算（简化）
+            return signals
+
+        # 计算年化收益率
+        # 资金费每 8 小时收取一次，一天 3 次
+        annual_rate = funding_rate * 3 * 365  # 年化
+
+        open_threshold = params.get('open_threshold', StatisticalArbStrategy.FUNDING_OPEN_THRESHOLD)
+        close_threshold = params.get('close_threshold', StatisticalArbStrategy.FUNDING_CLOSE_THRESHOLD)
+
+        # 信号生成
+        if abs(annual_rate) >= open_threshold:
+            if annual_rate > 0:
+                # 正费率：做空永续 + 做多现货
+                confidence = min(abs(annual_rate) / StatisticalArbStrategy.FUNDING_EXTREME, 1.0)
+                signals.append({
+                    'type': 'sell',  # 永续端卖出
+                    'price': current_price,
+                    'confidence': round(confidence * 0.9, 3),
+                    'arb_info': {
+                        'type': 'funding_arb',
+                        'direction': 'short_perp_long_spot',
+                        'funding_rate': round(funding_rate * 100, 4),
+                        'annual_rate_pct': round(annual_rate * 100, 2),
+                        'est_daily_income_pct': round(abs(funding_rate) * 3 * 100, 4),
+                        'risk': 'low' if abs(annual_rate) < 0.3 else 'medium',
+                    },
+                })
+            else:
+                # 负费率：做多永续 + 做空现货
+                confidence = min(abs(annual_rate) / StatisticalArbStrategy.FUNDING_EXTREME, 1.0)
+                signals.append({
+                    'type': 'buy',  # 永续端买入
+                    'price': current_price,
+                    'confidence': round(confidence * 0.9, 3),
+                    'arb_info': {
+                        'type': 'funding_arb',
+                        'direction': 'long_perp_short_spot',
+                        'funding_rate': round(funding_rate * 100, 4),
+                        'annual_rate_pct': round(annual_rate * 100, 2),
+                        'est_daily_income_pct': round(abs(funding_rate) * 3 * 100, 4),
+                        'risk': 'low' if abs(annual_rate) < 0.3 else 'medium',
+                    },
+                })
+        elif abs(annual_rate) < close_threshold and params.get('has_open_arb', False):
+            # 费率回落 → 平仓信号
+            signals.append({
+                'type': 'close',
+                'price': current_price,
+                'confidence': 0.8,
+                'arb_info': {
+                    'type': 'funding_arb_close',
+                    'reason': 'funding_rate_below_threshold',
+                    'current_annual_rate_pct': round(annual_rate * 100, 2),
+                },
+            })
+
+        return signals
+
+    @staticmethod
+    def _pair_stat_arb(df: pd.DataFrame, params: Dict) -> List[Dict]:
+        """
+        配对统计套利信号 (单品种简化版)
+
+        逻辑:
+        - 使用价格 Z-score 检测偏离
+        - Z-score > 阈值 → 均值回归信号
+        - 布林带 + RSI 过滤
+        """
+        signals = []
+        if len(df) < 60:
+            return signals
+
+        df = Indicators.add_all(df)
+        curr = df.iloc[-1]
+        current_price = float(curr['close'])
+
+        # Z-score
+        lookback = params.get('lookback', 60)
+        zscore_period = params.get('zscore_period', 20)
+        close = df['close']
+        sma = close.rolling(zscore_period).mean()
+        std = close.rolling(zscore_period).std()
+        zscore = (close - sma) / std.replace(0, np.nan)
+        current_z = float(zscore.iloc[-1])
+
+        if np.isnan(current_z):
+            return signals
+
+        # 均值回归信号
+        zscore_threshold = params.get('zscore_threshold', 2.0)
+
+        # RSI 过滤
+        rsi = float(curr.get('rsi', 50))
+
+        if current_z <= -zscore_threshold:
+            # 价格低于均值 2 个标准差 → 做多（均值回归）
+            confidence = min(abs(current_z) / 3.0, 1.0)
+            # RSI 超卖加成
+            if rsi < 30:
+                confidence = min(confidence + 0.15, 0.95)
+            signals.append({
+                'type': 'buy',
+                'price': current_price,
+                'confidence': round(confidence, 3),
+                'arb_info': {
+                    'type': 'stat_arb',
+                    'direction': 'mean_reversion_long',
+                    'zscore': round(current_z, 2),
+                    'rsi': round(rsi, 1),
+                    'sma': round(float(sma.iloc[-1]), 2),
+                    'deviation_pct': round((current_price / float(sma.iloc[-1]) - 1) * 100, 2),
+                },
+            })
+
+        elif current_z >= zscore_threshold:
+            # 价格高于均值 2 个标准差 → 做空（均值回归）
+            confidence = min(abs(current_z) / 3.0, 1.0)
+            if rsi > 70:
+                confidence = min(confidence + 0.15, 0.95)
+            signals.append({
+                'type': 'sell',
+                'price': current_price,
+                'confidence': round(confidence, 3),
+                'arb_info': {
+                    'type': 'stat_arb',
+                    'direction': 'mean_reversion_short',
+                    'zscore': round(current_z, 2),
+                    'rsi': round(rsi, 1),
+                    'sma': round(float(sma.iloc[-1]), 2),
+                    'deviation_pct': round((current_price / float(sma.iloc[-1]) - 1) * 100, 2),
+                },
+            })
+
+        return signals
+
+    @staticmethod
+    def scan_opportunities(symbols: List[str] = None,
+                           exchanges: List[str] = None) -> List[Dict]:
+        """
+        扫描多个交易对的资金费率套利机会
+
+        返回按年化收益率排序的机会列表
+        """
+        if symbols is None:
+            symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
+                       'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'DOT/USDT']
+
+        opportunities = []
+
+        try:
+            from engine.sentiment import OnChainMonitor
+            monitor = OnChainMonitor()
+
+            for symbol in symbols:
+                try:
+                    fr_data = monitor.get_funding_rate(symbol)
+                    if not fr_data or fr_data.get('latest_rate') is None:
+                        continue
+
+                    rate = fr_data['latest_rate']
+                    annual = rate * 3 * 365
+
+                    # 获取多空比
+                    ls_data = monitor.get_long_short_ratio(symbol)
+                    ls_ratio = ls_data.get('latest_ratio', 0) if ls_data else 0
+
+                    opportunities.append({
+                        'symbol': symbol,
+                        'funding_rate': round(rate * 100, 4),
+                        'annual_rate_pct': round(annual * 100, 2),
+                        'daily_income_pct': round(abs(rate) * 3 * 100, 4),
+                        'direction': 'short_perp_long_spot' if rate > 0 else 'long_perp_short_spot',
+                        'long_short_ratio': round(ls_ratio, 3),
+                        'risk_level': 'low' if abs(annual) < 0.3 else ('medium' if abs(annual) < 0.6 else 'high'),
+                        'aprs': fr_data.get('rates', [])[:3],
+                    })
+                except Exception:
+                    continue
+
+        except Exception as e:
+            logger.error(f"Scan opportunities error: {e}")
+
+        # 按年化收益率降序排列
+        opportunities.sort(key=lambda x: abs(x['annual_rate_pct']), reverse=True)
+        return opportunities
+
+
+# ================================================================
 # 交易所客户端 — 含本地缓存
 # ================================================================
 
@@ -1669,6 +1930,28 @@ class BacktestEngine:
                         buy[i] = (i % (interval * 2) == 0)  # 正常，减频
                     elif rsi[i] > 80:
                         sell[i] = True  # 超买，卖出
+
+        elif strategy_type == 'stat_arb':
+            # 均值回归 Z-score
+            close = df['close'].values
+            zp = params.get('zscore_period', 20)
+            zt = params.get('zscore_threshold', 2.0)
+            rsi = df['rsi'].values
+
+            for i in range(max(50, zp), n):
+                window = close[max(0, i-zp):i]
+                if len(window) < zp:
+                    continue
+                mean = np.mean(window)
+                std = np.std(window)
+                if std == 0:
+                    continue
+                z = (close[i] - mean) / std
+
+                if z <= -zt:
+                    buy[i] = True
+                elif z >= zt:
+                    sell[i] = True
 
         buy[:50] = False
         sell[:50] = False

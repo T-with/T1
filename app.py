@@ -989,6 +989,61 @@ def api_dca_weight():
 
 
 # ================================================================
+# API: 统计套利
+# ================================================================
+
+@app.route('/api/arb/scan', methods=['GET'])
+def api_arb_scan():
+    """扫描资金费率套利机会"""
+    try:
+        symbols = request.args.get('symbols', 'BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,DOGE/USDT').split(',')
+        from engine.core import StatisticalArbStrategy
+        opportunities = StatisticalArbStrategy.scan_opportunities(symbols)
+        return jsonify({
+            'count': len(opportunities),
+            'opportunities': opportunities,
+            'timestamp': datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"Arb scan error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/arb/funding/<symbol>', methods=['GET'])
+def api_arb_funding(symbol):
+    """获取单个交易对的资金费率套利分析"""
+    try:
+        symbol_fmt = symbol.replace('_', '/')
+        from engine.sentiment import OnChainMonitor
+        monitor = OnChainMonitor()
+        fr_data = monitor.get_funding_rate(symbol_fmt)
+        ls_data = monitor.get_long_short_ratio(symbol_fmt)
+        oi_data = monitor.get_open_interest(symbol_fmt)
+
+        result = {
+            'symbol': symbol_fmt,
+            'funding_rate': fr_data,
+            'long_short_ratio': ls_data,
+            'open_interest': oi_data,
+        }
+
+        # 计算套利收益
+        if fr_data and fr_data.get('latest_rate') is not None:
+            rate = fr_data['latest_rate']
+            result['arbitrage'] = {
+                'current_rate': round(rate * 100, 4),
+                'annual_rate_pct': round(rate * 3 * 365 * 100, 2),
+                'daily_income_pct': round(abs(rate) * 3 * 100, 4),
+                'direction': 'short_perp_long_spot' if rate > 0 else 'long_perp_short_spot',
+                'recommendation': 'open' if abs(rate * 3 * 365) > 0.10 else ('close' if abs(rate * 3 * 365) < 0.03 else 'hold'),
+            }
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ================================================================
 # 启动
 # ================================================================
 
