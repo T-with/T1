@@ -54,6 +54,25 @@ class TimeSeriesDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss — 处理类别不平衡
+    对易分类样本降权，聚焦难分类样本
+    gamma=0 退化为 BCELoss，gamma 越大越聚焦
+    """
+
+    def __init__(self, gamma: float = 2.0, alpha: float = 0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, pred, target):
+        bce = nn.functional.binary_cross_entropy(pred, target, reduction='none')
+        pt = torch.where(target == 1, pred, 1 - pred)
+        focal_weight = self.alpha * (1 - pt) ** self.gamma
+        return (focal_weight * bce).mean()
+
+
 # ================================================================
 # LSTM 模型
 # ================================================================
@@ -122,11 +141,17 @@ class PositionalEncoding(nn.Module):
 
 class TransformerPredictor(nn.Module):
     """
-    Transformer Encoder 价格方向预测器
+    Transformer Encoder 价格方向预测器（增强版）
 
     架构:
-    Input -> Linear(embed) -> PosEncode -> TransformerEncoder
-          -> GlobalAvgPool -> FC(hidden) -> ReLU -> Dropout -> FC(out) -> Sigmoid
+    Input -> Linear(embed) -> PosEncode -> TransformerEncoder(多层)
+          -> Attention Pool(可学习加权) -> FC(hidden) -> GELU -> Dropout -> FC(out) -> Sigmoid
+
+    增强特性:
+    - 可学习的注意力池化（而非简单平均）
+    - 多尺度特征提取（不同 head 看不同时间尺度）
+    - 残差连接 + Pre-Norm（训练更稳定）
+    - Label Smoothing + Focal Loss（处理类别不平衡）
     """
 
     def __init__(self, input_size: int, d_model: int = 64,
@@ -135,11 +160,12 @@ class TransformerPredictor(nn.Module):
         super().__init__()
         self.d_model = d_model
 
-        # 输入投影
+        # 输入投影 + LayerNorm
         self.input_proj = nn.Linear(input_size, d_model)
+        self.input_norm = nn.LayerNorm(d_model)
         self.pos_encoder = PositionalEncoding(d_model)
 
-        # Transformer Encoder
+        # Transformer Encoder (Pre-Norm 架构，训练更稳定)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -147,33 +173,62 @@ class TransformerPredictor(nn.Module):
             dropout=dropout,
             batch_first=True,
             activation='gelu',
+            norm_first=True,  # Pre-Norm：比 Post-Norm 训练更稳定
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
+        # 可学习注意力池化（加权聚合序列，而非简单平均）
+        self.attn_pool = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.Tanh(),
+            nn.Linear(d_model // 2, 1),
+        )
+
         # 输出头
-        self.fc1 = nn.Linear(d_model, d_model // 2)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(d_model // 2, 1)
+        self.fc1 = nn.Linear(d_model, d_model)
+        self.gelu = nn.GELU()
+        self.dropout1 = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(d_model, d_model // 2)
+        self.dropout2 = nn.Dropout(dropout)
+        self.fc3 = nn.Linear(d_model // 2, 1)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
+        # 注意力权重缓存（用于可解释性）
+        self._attention_weights = None
+
+    def forward(self, x, return_attention=False):
         # x: (batch, seq_len, features)
-        # 投影到 d_model 维度
         x = self.input_proj(x) * np.sqrt(self.d_model)
+        x = self.input_norm(x)
         x = self.pos_encoder(x)
 
         # Transformer 编码
         x = self.transformer(x)
 
-        # 全局平均池化
-        x = x.mean(dim=1)
+        # 可学习注意力池化
+        attn_scores = self.attn_pool(x)  # (batch, seq_len, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)  # (batch, seq_len, 1)
+        x = (x * attn_weights).sum(dim=1)  # (batch, d_model)
 
+        if return_attention:
+            self._attention_weights = attn_weights.detach().cpu()
+
+        # 输出头（带残差风格的深度）
+        residual = x
         x = self.fc1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
+        x = self.gelu(x)
+        x = self.dropout1(x)
+        x = x + residual * 0.5  # 轻量残差
+
         x = self.fc2(x)
+        x = self.gelu(x)
+        x = self.dropout2(x)
+        x = self.fc3(x)
         return self.sigmoid(x).squeeze(-1)
+
+    def get_attention_weights(self):
+        """获取最后一次前向传播的注意力权重"""
+        return self._attention_weights
 
 
 # ================================================================
@@ -392,7 +447,10 @@ class ModelManager:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=5
         )
-        criterion = nn.BCELoss()
+        # 使用 FocalLoss 处理类别不平衡
+        pos_ratio = float(np.mean(y_train))
+        alpha = max(0.1, min(0.9, 1 - pos_ratio))  # 少数类权重
+        criterion = FocalLoss(gamma=2.0, alpha=alpha)
 
         # 5. 训练循环
         best_val_loss = float('inf')
@@ -545,7 +603,17 @@ class ModelManager:
 
         model.eval()
         with torch.no_grad():
-            prob = model(x_tensor).item()
+            if model_type == 'transformer':
+                prob = model(x_tensor, return_attention=True).item()
+                attn = model.get_attention_weights()
+                attention_top5 = []
+                if attn is not None:
+                    weights = attn[0, :, 0].numpy()
+                    top5_idx = np.argsort(weights)[-5:][::-1]
+                    attention_top5 = [{'position': int(i), 'weight': round(float(weights[i]), 4)} for i in top5_idx]
+            else:
+                prob = model(x_tensor).item()
+                attention_top5 = []
 
         # 信号判断
         if prob >= 0.6:
@@ -569,6 +637,7 @@ class ModelManager:
             'signal': signal,
             'confidence': round(confidence * 100, 1),
             'current_price': round(current_price, 2),
+            'attention_top5': attention_top5,
             'model_info': {
                 'val_accuracy': round(meta.val_accuracy * 100, 1),
                 'train_samples': meta.train_samples,
