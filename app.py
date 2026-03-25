@@ -1052,6 +1052,105 @@ def api_arb_funding(symbol):
 
 
 # ================================================================
+# API: 多交易所管理
+# ================================================================
+
+@app.route('/api/multi-exchange/status', methods=['GET'])
+def api_multi_exchange_status():
+    """多交易所连接状态"""
+    try:
+        from engine.multi_exchange import multi_exchange
+        return jsonify(multi_exchange.get_status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/multi-exchange/add', methods=['POST'])
+def api_multi_exchange_add():
+    """添加交易所"""
+    data = request.json or {}
+    try:
+        from engine.multi_exchange import multi_exchange
+        import asyncio
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(multi_exchange.add_exchange(
+            data.get('exchange_id', ''),
+            data.get('api_key', ''),
+            data.get('api_secret', ''),
+            data.get('passphrase', ''),
+        ))
+        loop.close()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/multi-exchange/prices/<symbol>', methods=['GET'])
+def api_multi_exchange_prices(symbol):
+    """多交易所价格对比"""
+    try:
+        from engine.multi_exchange import multi_exchange
+        import asyncio
+        symbol_fmt = symbol.replace('_', '/')
+        loop = asyncio.new_event_loop()
+        prices = loop.run_until_complete(
+            multi_exchange.price_aggregator.get_all_prices(symbol_fmt)
+        )
+        arb = loop.run_until_complete(
+            multi_exchange.price_aggregator.find_arbitrage(symbol_fmt, 0.05)
+        )
+        loop.close()
+        return jsonify({
+            'symbol': symbol_fmt,
+            'prices': prices,
+            'arbitrage': arb,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/multi-exchange/execute', methods=['POST'])
+def api_multi_exchange_execute():
+    """多交易所执行"""
+    data = request.json or {}
+    try:
+        from engine.multi_exchange import multi_exchange
+        import asyncio
+        symbol = data.get('symbol', 'BTC/USDT')
+        side = data.get('side', 'buy')
+        amount = float(data.get('amount', 0))
+        mode = data.get('mode', 'auto')
+
+        if amount <= 0:
+            return jsonify({'error': 'Amount must be > 0'}), 400
+
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(
+            multi_exchange.execute(symbol, side, amount, mode=mode)
+        )
+        loop.close()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/multi-exchange/positions', methods=['GET'])
+def api_multi_exchange_positions():
+    """跨交易所聚合持仓"""
+    try:
+        from engine.multi_exchange import multi_exchange
+        import asyncio
+        loop = asyncio.new_event_loop()
+        positions = loop.run_until_complete(
+            multi_exchange.position_sync.get_aggregated_positions()
+        )
+        loop.close()
+        return jsonify({'positions': positions})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ================================================================
 # 启动
 # ================================================================
 

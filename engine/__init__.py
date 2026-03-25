@@ -33,3 +33,8 @@ from .rl import (
     PPOAgent, TradingEnvironment, RLStrategyManager,
     rl_manager
 )
+from .multi_exchange import (
+    MultiExchangeManager, ExchangeHealthMonitor, ExchangeHealth,
+    MultiExchangeExecutor, PriceAggregator, PositionSynchronizer,
+    multi_exchange
+)
