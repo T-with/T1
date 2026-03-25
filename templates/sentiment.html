@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}市场情绪 — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-3">
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">情绪指数</div>
+            <div class="stat-value" id="sentiment-index">--</div>
+            <div class="stat-label" id="sentiment-label">--</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">新闻情绪</div>
+            <div class="stat-value" id="news-score">--</div>
+            <div class="stat-label">基于新闻/社交媒体</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">链上信号</div>
+            <div class="stat-value" id="onchain-score">--</div>
+            <div class="stat-label">资金费率/多空比</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">1h 趋势</div>
+            <div class="stat-value" id="trend-1h">--</div>
+            <div class="stat-label" id="trend-24h-label">24h: --</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between">
+                <h6 class="mb-0"><i class="bi bi-emoji-smile"></i> 恐惧贪婪指数</h6>
+                <select class="form-select form-select-sm" style="width:auto" id="sym-select" onchange="loadSentiment()">
+                    <option value="BTC_USDT">BTC/USDT</option>
+                    <option value="ETH_USDT">ETH/USDT</option>
+                    <option value="SOL_USDT">SOL/USDT</option>
+                </select>
+            </div>
+            <div class="card-body text-center">
+                <div id="gauge-container" style="position:relative;width:200px;height:110px;margin:0 auto">
+                    <svg viewBox="0 0 200 110" width="200" height="110">
+                        <path d="M 10 100 A 90 90 0 0 1 190 100" fill="none" stroke="#e9ecef" stroke-width="16" stroke-linecap="round"/>
+                        <path d="M 10 100 A 90 90 0 0 1 190 100" fill="none" stroke="url(#gaugeGrad)" stroke-width="16" stroke-linecap="round" id="gauge-fill" stroke-dasharray="283" stroke-dashoffset="141"/>
+                        <defs>
+                            <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" style="stop-color:#dc3545"/>
+                                <stop offset="25%" style="stop-color:#fd7e14"/>
+                                <stop offset="50%" style="stop-color:#ffc107"/>
+                                <stop offset="75%" style="stop-color:#20c997"/>
+                                <stop offset="100%" style="stop-color:#198754"/>
+                            </linearGradient>
+                        </defs>
+                        <circle id="gauge-dot" cx="100" cy="10" r="8" fill="#0d6efd"/>
+                        <text x="100" y="85" text-anchor="middle" font-size="32" font-weight="700" id="gauge-num">--</text>
+                        <text x="100" y="105" text-anchor="middle" font-size="11" fill="#6c757d" id="gauge-text">--</text>
+                    </svg>
+                </div>
+                <div class="mt-2">
+                    <span class="badge bg-danger">极度恐惧</span>
+                    <span class="badge bg-warning">恐惧</span>
+                    <span class="badge bg-secondary">中性</span>
+                    <span class="badge bg-info">贪婪</span>
+                    <span class="badge bg-success">极度贪婪</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-link-45deg"></i> 链上数据</h6></div>
+            <div class="card-body">
+                <div class="row" id="onchain-data">
+                    <div class="col-md-4">
+                        <div class="card bg-light mb-2">
+                            <div class="card-body text-center">
+                                <div class="stat-label">资金费率</div>
+                                <div class="fs-4 fw-bold" id="fr-rate">--</div>
+                                <div class="small text-muted" id="fr-detail">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-light mb-2">
+                            <div class="card-body text-center">
+                                <div class="stat-label">多空比</div>
+                                <div class="fs-4 fw-bold" id="ls-ratio">--</div>
+                                <div class="small text-muted" id="ls-trend">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-light mb-2">
+                            <div class="card-body text-center">
+                                <div class="stat-label">未平仓合约</div>
+                                <div class="fs-4 fw-bold" id="oi-value">--</div>
+                                <div class="small text-muted">Open Interest</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <table class="table table-sm mt-2" id="fr-table">
+                    <thead><tr><th>时间</th><th>费率</th><th>年化</th></tr></thead>
+                    <tbody id="fr-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0 text-success"><i class="bi bi-hand-thumbs-up"></i> 正面新闻</h6></div>
+            <div class="card-body" style="max-height:300px;overflow-y:auto">
+                <div id="positive-news" class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0 text-danger"><i class="bi bi-hand-thumbs-down"></i> 负面新闻</h6></div>
+            <div class="card-body" style="max-height:300px;overflow-y:auto">
+                <div id="negative-news" class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updateGauge(index, label) {
+    const totalLen = 283;
+    const offset = totalLen - (index / 100 * totalLen);
+    document.getElementById('gauge-fill').setAttribute('stroke-dashoffset', offset);
+    const angle = -90 + (index / 100) * 180;
+    const rad = angle * Math.PI / 180;
+    const dotX = 100 + 90 * Math.cos(rad);
+    const dotY = 100 + 90 * Math.sin(rad);
+    document.getElementById('gauge-dot').setAttribute('cx', dotX);
+    document.getElementById('gauge-dot').setAttribute('cy', dotY);
+    document.getElementById('gauge-num').textContent = index;
+    const labelMap = {extreme_fear:'极度恐惧',fear:'恐惧',neutral:'中性',greed:'贪婪',extreme_greed:'极度贪婪'};
+    document.getElementById('gauge-text').textContent = labelMap[label] || label;
+}
+
+async function loadSentiment() {
+    const sym = document.getElementById('sym-select').value;
+    try {
+        const d = await API.get('/api/sentiment/' + sym);
+        document.getElementById('sentiment-index').textContent = d.index;
+        document.getElementById('sentiment-label').textContent = d.label_cn;
+        document.getElementById('news-score').innerHTML = '<span class="' + (d.components.news > 0 ? 'green' : d.components.news < 0 ? 'red' : '') + '">' + (d.components.news > 0 ? '+' : '') + fmt(d.components.news, 3) + '</span>';
+        document.getElementById('onchain-score').innerHTML = '<span class="' + (d.components.onchain > 0 ? 'green' : d.components.onchain < 0 ? 'red' : '') + '">' + (d.components.onchain > 0 ? '+' : '') + fmt(d.components.onchain, 3) + '</span>';
+        document.getElementById('trend-1h').innerHTML = '<span class="' + pnlClass(d.trend['1h']) + '">' + (d.trend['1h'] > 0 ? '+' : '') + fmt(d.trend['1h'], 3) + '</span>';
+        document.getElementById('trend-24h-label').textContent = '24h: ' + (d.trend['24h'] > 0 ? '+' : '') + fmt(d.trend['24h'], 3);
+        updateGauge(d.index, d.label);
+    } catch(e) {
+        console.error('Sentiment load error:', e);
+    }
+
+    // Detail report
+    try {
+        const detail = await API.get('/api/sentiment/' + sym + '/detail');
+        document.getElementById('positive-news').innerHTML = (detail.top_positive || []).length === 0
+            ? '<div class="text-muted">暂无</div>'
+            : detail.top_positive.map(n => '<div class="mb-2 p-2" style="border-left:3px solid var(--bs-success)"><div class="small">' + n.title + '</div><div class="text-muted" style="font-size:0.75rem">' + n.source + ' · +' + n.score + '</div></div>').join('');
+        document.getElementById('negative-news').innerHTML = (detail.top_negative || []).length === 0
+            ? '<div class="text-muted">暂无</div>'
+            : detail.top_negative.map(n => '<div class="mb-2 p-2" style="border-left:3px solid var(--bs-danger)"><div class="small">' + n.title + '</div><div class="text-muted" style="font-size:0.75rem">' + n.source + ' · ' + n.score + '</div></div>').join('');
+    } catch(e) {}
+
+    // On-chain data
+    try {
+        const oc = await API.get('/api/sentiment/' + sym + '/onchain');
+        const fr = oc.funding_rate;
+        if (fr && fr.latest_rate !== undefined) {
+            const ratePct = (fr.latest_rate * 100).toFixed(4);
+            document.getElementById('fr-rate').innerHTML = '<span class="' + (fr.latest_rate > 0 ? 'green' : 'red') + '">' + ratePct + '%</span>';
+            document.getElementById('fr-detail').textContent = '年化: ' + (fr.latest_rate * 3 * 365 * 100).toFixed(1) + '%';
+            document.getElementById('fr-tbody').innerHTML = (fr.rates || []).map(r =>
+                '<tr><td>' + r.time + '</td><td class="' + (r.rate > 0 ? 'green' : 'red') + '">' + r.rate_pct + '%</td><td>' + (r.rate * 3 * 365 * 100).toFixed(1) + '%</td></tr>'
+            ).join('');
+        }
+        const ls = oc.long_short_ratio;
+        if (ls && ls.latest_ratio !== undefined) {
+            document.getElementById('ls-ratio').textContent = ls.latest_ratio.toFixed(3);
+            const trendMap = {long_heavy:'偏多',short_heavy:'偏空',balanced:'均衡'};
+            const trendColor = {long_heavy:'green',short_heavy:'red',balanced:'secondary'}[ls.trend]||'secondary';
+            document.getElementById('ls-trend').innerHTML = '<span class="badge bg-' + trendColor + '">' + (trendMap[ls.trend]||ls.trend) + '</span>';
+        }
+        const oi = oc.open_interest;
+        if (oi && oi.open_interest) {
+            document.getElementById('oi-value').textContent = Number(oi.open_interest).toLocaleString();
+        }
+    } catch(e) {}
+}
+
+loadSentiment();
+setInterval(loadSentiment, 60000);
+</script>
+{% endblock %}

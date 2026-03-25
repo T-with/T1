@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}风控中心 — MyTradingPlatform{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-3">
+    <div class="col-md-3">
+        <div class="card stat-card" id="cb-card">
+            <div class="stat-label">熔断状态</div>
+            <div class="stat-value" id="cb-status"><span class="badge bg-success">正常</span></div>
+            <div class="stat-label" id="cb-reason"></div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">当前权益</div>
+            <div class="stat-value" id="equity-value">--</div>
+            <div class="stat-label" id="equity-pnl"></div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">最大回撤</div>
+            <div class="stat-value red" id="dd-value">--</div>
+            <div class="stat-label">限制: <span id="dd-limit">--</span>%</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="stat-label">今日盈亏</div>
+            <div class="stat-value" id="daily-pnl">--</div>
+            <div class="stat-label">限制: <span id="daily-limit">--</span>%</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0"><i class="bi bi-exclamation-triangle"></i> 风控事件</h6>
+                <span class="badge bg-secondary" id="event-total">0</span>
+            </div>
+            <div class="card-body" style="max-height:400px;overflow-y:auto">
+                <div id="events-list" class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-bar-chart"></i> 事件统计</h6></div>
+            <div class="card-body">
+                <canvas id="event-chart" height="200"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-graph-up"></i> 凯利公式仓位</h6></div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">策略 ID</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="kelly-sid" placeholder="输入策略 ID">
+                        <button class="btn btn-primary" onclick="loadKelly()">计算</button>
+                    </div>
+                </div>
+                <div id="kelly-result" style="display:none">
+                    <div class="text-center mb-3">
+                        <div class="stat-value blue" id="kelly-pct">--</div>
+                        <div class="stat-label">建议仓位比例</div>
+                    </div>
+                    <table class="table table-sm">
+                        <tr><td>胜率</td><td id="kelly-wr" class="text-end">--</td></tr>
+                        <tr><td>赔率</td><td id="kelly-pr" class="text-end">--</td></tr>
+                        <tr><td>凯利原始值</td><td id="kelly-raw" class="text-end">--</td></tr>
+                        <tr><td>半凯利调整</td><td id="kelly-adj" class="text-end">--</td></tr>
+                        <tr><td>置信度</td><td id="kelly-conf" class="text-end">--</td></tr>
+                        <tr><td>样本数</td><td id="kelly-n" class="text-end">--</td></tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-lightning"></i> 波动率分析</h6></div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">交易对</label>
+                    <div class="input-group">
+                        <select class="form-select" id="vol-symbol">
+                            <option value="BTC_USDT">BTC/USDT</option>
+                            <option value="ETH_USDT">ETH/USDT</option>
+                            <option value="SOL_USDT">SOL/USDT</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="loadVol()">分析</button>
+                    </div>
+                </div>
+                <div id="vol-result" style="display:none">
+                    <div class="text-center mb-2">
+                        <span class="badge fs-6" id="vol-regime">--</span>
+                    </div>
+                    <table class="table table-sm">
+                        <tr><td>历史波动率(20)</td><td id="vol-hist20" class="text-end">--</td></tr>
+                        <tr><td>历史波动率(60)</td><td id="vol-hist60" class="text-end">--</td></tr>
+                        <tr><td>EWMA(20)</td><td id="vol-ewma" class="text-end">--</td></tr>
+                        <tr><td>Parkinson(20)</td><td id="vol-park" class="text-end">--</td></tr>
+                        <tr><td>波动率突增</td><td id="vol-spike" class="text-end">--</td></tr>
+                        <tr><td>风险等级</td><td id="vol-risk" class="text-end">--</td></tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-gear"></i> 风控操作</h6></div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <button class="btn btn-danger" onclick="releaseBreaker()">
+                        <i class="bi bi-power"></i> 解除熔断
+                    </button>
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="resume-sid" placeholder="策略 ID">
+                        <button class="btn btn-warning" onclick="resumeStrategy()">恢复策略</button>
+                    </div>
+                    <hr>
+                    <div class="stat-label">暂停策略列表</div>
+                    <div id="halted-list" class="small text-muted">无</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+let eventChart = null;
+
+async function loadDashboard() {
+    const d = await API.get('/api/risk/dashboard');
+
+    // Circuit breaker
+    const cb = d.circuit_breaker;
+    if (cb.active) {
+        document.getElementById('cb-status').innerHTML = '<span class="badge bg-danger fs-6">熔断中</span>';
+        document.getElementById('cb-reason').textContent = cb.reason + ' (剩余' + Math.ceil(cb.cooldown_remaining) + 's)';
+    } else {
+        document.getElementById('cb-status').innerHTML = '<span class="badge bg-success fs-6">正常</span>';
+        document.getElementById('cb-reason').textContent = '';
+    }
+
+    // Equity
+    const eq = d.equity;
+    document.getElementById('equity-value').textContent = fmt(eq.current, 0) + ' USDT';
+    document.getElementById('equity-pnl').innerHTML = '<span class="' + pnlClass(eq.daily_pnl_pct) + '">' + pnlSign(eq.daily_pnl_pct) + '% 今日</span>';
+    document.getElementById('dd-value').textContent = fmt(eq.drawdown_pct) + '%';
+    document.getElementById('dd-limit').textContent = d.limits.max_drawdown_pct;
+    document.getElementById('daily-pnl').innerHTML = '<span class="' + pnlClass(eq.daily_pnl_pct) + '">' + pnlSign(eq.daily_pnl_pct) + '%</span>';
+    document.getElementById('daily-limit').textContent = d.limits.daily_loss_limit_pct;
+
+    // Events
+    const events = d.recent_events || [];
+    document.getElementById('event-total').textContent = d.total_events;
+    document.getElementById('events-list').innerHTML = events.length === 0
+        ? '<div class="text-muted text-center">暂无风控事件</div>'
+        : events.reverse().map(e => {
+            const color = {normal:'success',warning:'warning',danger:'danger',critical:'danger',circuit_breaker:'dark'}[e.level] || 'secondary';
+            return `<div class="d-flex align-items-center mb-2 p-2" style="border-left:3px solid var(--bs-${color})">
+                <div class="me-2"><span class="badge bg-${color}">${e.level}</span></div>
+                <div class="flex-grow-1"><div class="small">${e.message}</div><div class="text-muted" style="font-size:0.75rem">${e.time} ${e.strategy?'· '+e.strategy:''}</div></div>
+            </div>`;
+        }).join('');
+
+    // Event chart
+    const counts = d.event_counts || {};
+    const labels = Object.keys(counts);
+    const values = Object.values(counts);
+    if (eventChart) eventChart.destroy();
+    if (labels.length > 0) {
+        eventChart = new Chart(document.getElementById('event-chart'), {
+            type: 'doughnut',
+            data: { labels, datasets: [{ data: values, backgroundColor: ['#198754','#ffc107','#dc3545','#6f42c1','#0dcaf0'] }] },
+            options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+        });
+    }
+
+    // Halted
+    document.getElementById('halted-list').textContent = d.halted_strategies.length > 0
+        ? d.halted_strategies.join(', ') : '无';
+}
+
+async function loadKelly() {
+    const sid = document.getElementById('kelly-sid').value.trim();
+    if (!sid) return toast('请输入策略 ID', 'warning');
+    const d = await API.get('/api/risk/kelly/' + sid);
+    document.getElementById('kelly-result').style.display = 'block';
+    document.getElementById('kelly-pct').textContent = d.position_pct + '%';
+    document.getElementById('kelly-wr').textContent = d.win_rate + '%';
+    document.getElementById('kelly-pr').textContent = d.payoff_ratio;
+    document.getElementById('kelly-raw').textContent = d.kelly_raw + '%';
+    document.getElementById('kelly-adj').textContent = d.kelly_adjusted + '%';
+    document.getElementById('kelly-conf').textContent = d.confidence;
+    document.getElementById('kelly-n').textContent = d.sample_size;
+}
+
+async function loadVol() {
+    const sym = document.getElementById('vol-symbol').value;
+    const d = await API.get('/api/risk/volatility/' + sym);
+    document.getElementById('vol-result').style.display = 'block';
+    const v = d.volatility || {};
+    document.getElementById('vol-hist20').textContent = (v.historical_20 * 100).toFixed(2) + '%';
+    document.getElementById('vol-hist60').textContent = (v.historical_60 * 100).toFixed(2) + '%';
+    document.getElementById('vol-ewma').textContent = (v.ewma_20 * 100).toFixed(2) + '%';
+    document.getElementById('vol-park').textContent = (v.parkinson_20 * 100).toFixed(2) + '%';
+    const regime = d.regime || 'unknown';
+    const regimeMap = {low_vol:'低波动',normal:'正常',high_vol:'高波动',extreme:'极端'};
+    const regimeColor = {low_vol:'success',normal:'info',high_vol:'warning',extreme:'danger'}[regime]||'secondary';
+    document.getElementById('vol-regime').innerHTML = '<span class="badge bg-'+regimeColor+'">'+(regimeMap[regime]||regime)+'</span>';
+    const spike = d.vol_spike || {};
+    document.getElementById('vol-spike').innerHTML = spike.spike ? '<span class="red">是 ('+spike.ratio+'x)</span>' : '否';
+    document.getElementById('vol-risk').innerHTML = '<span class="badge bg-'+({normal:'success',warning:'warning',danger:'danger',critical:'danger'}[d.risk_level]||'secondary')+'">'+d.risk_level+'</span>';
+}
+
+async function releaseBreaker() {
+    await API.post('/api/risk/circuit-breaker/release');
+    toast('熔断已解除', 'success');
+    loadDashboard();
+}
+
+async function resumeStrategy() {
+    const sid = document.getElementById('resume-sid').value.trim();
+    if (!sid) return toast('请输入策略 ID', 'warning');
+    await API.post('/api/risk/resume/' + sid);
+    toast('策略 ' + sid + ' 已恢复', 'success');
+    loadDashboard();
+}
+
+loadDashboard();
+setInterval(loadDashboard, 10000);
+</script>
+{% endblock %}

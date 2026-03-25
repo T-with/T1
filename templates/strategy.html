@@ -38,6 +38,13 @@
                         <label class="form-label">策略类型</label>
                         <select class="form-select" id="s-type">
                             <option value="ai_multi_factor">🧠 AI 多因子 (XGBoost) ⭐推荐</option>
+                            <option value="lstm">🧠 LSTM 深度学习</option>
+                            <option value="transformer">🧠 Transformer 注意力</option>
+                            <option value="rl_ppo">🎮 强化学习 PPO</option>
+                            <option value="ai_grid">📐 AI 动态网格</option>
+                            <option value="smart_dca">💰 智能定投 DCA</option>
+                            <option value="funding_arb">🔄 资金费率套利</option>
+                            <option value="stat_arb">📊 统计套利 (均值回归)</option>
                             <option value="macd_cross">MACD 金叉/死叉</option>
                             <option value="rsi_reversal">RSI 超买超卖</option>
                             <option value="bollinger_breakout">布林带突破</option>
@@ -130,6 +137,13 @@
 <script>
 const typeNames = {
     ai_multi_factor: '🧠 AI 多因子',
+    lstm: '🧠 LSTM',
+    transformer: '🧠 Transformer',
+    rl_ppo: '🎮 RL PPO',
+    ai_grid: '📐 AI 网格',
+    smart_dca: '💰 智能 DCA',
+    funding_arb: '🔄 费率套利',
+    stat_arb: '📊 统计套利',
     macd_cross: 'MACD 金叉/死叉',
     rsi_reversal: 'RSI 超买超卖',
     bollinger_breakout: '布林带突破',

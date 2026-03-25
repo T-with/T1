@@ -137,6 +137,14 @@ def live_page():
 def settings_page():
     return render_template('settings.html')
 
+@app.route('/risk')
+def risk_page():
+    return render_template('risk.html')
+
+@app.route('/sentiment')
+def sentiment_page():
+    return render_template('sentiment.html')
+
 @app.route('/ai')
 def ai_page():
     return render_template('ai.html')
