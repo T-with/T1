@@ -1,6 +1,22 @@
 {% extends "base.html" %}
 {% block title %}策略管理 — MyTradingPlatform{% endblock %}
 
+{% block head %}
+<style>
+    .strategy-card { border-left: 3px solid var(--border); transition: border-color 0.3s; }
+    .strategy-card.running { border-left-color: var(--green); }
+    .strategy-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .signal-preview { padding: 12px; border-radius: 8px; background: rgba(13,110,253,0.05);
+        border: 1px dashed var(--border); margin-top: 8px; min-height: 80px; }
+    .signal-buy { border-color: var(--green); background: rgba(25,135,84,0.05); }
+    .signal-sell { border-color: var(--red); background: rgba(220,53,69,0.05); }
+    .confidence-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+    .confidence-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+    .param-badge { font-size: 0.72rem; padding: 2px 6px; border-radius: 4px;
+        background: rgba(13,110,253,0.1); color: var(--blue); margin: 2px; display: inline-block; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="row g-3">
     <div class="col-md-5">
@@ -21,6 +37,9 @@
                                 <option value="SOL/USDT">SOL/USDT</option>
                                 <option value="BNB/USDT">BNB/USDT</option>
                                 <option value="XRP/USDT">XRP/USDT</option>
+                                <option value="DOGE/USDT">DOGE/USDT</option>
+                                <option value="ADA/USDT">ADA/USDT</option>
+                                <option value="AVAX/USDT">AVAX/USDT</option>
                             </select>
                         </div>
                         <div class="col-6 mb-3">
@@ -88,6 +107,17 @@
                         <input class="form-check-input" type="checkbox" id="s-trailing" checked>
                         <label class="form-check-label">启用追踪止损</label>
                     </div>
+
+                    <!-- 实时信号预览 -->
+                    <div class="signal-preview" id="signal-preview">
+                        <div class="text-muted text-center"><i class="bi bi-eye"></i> 创建后可实时预览信号</div>
+                    </div>
+                    <div class="mt-2 mb-3">
+                        <button type="button" class="btn btn-outline-primary btn-sm w-100" id="btn-preview">
+                            <i class="bi bi-eye"></i> 预览当前信号
+                        </button>
+                    </div>
+
                     <button type="submit" class="btn btn-primary btn-trade w-100">
                         <i class="bi bi-plus-circle"></i> 创建策略
                     </button>
@@ -98,14 +128,14 @@
 
     <div class="col-md-7">
         <div class="card">
-            <div class="card-header"><h6 class="mb-0"><i class="bi bi-list"></i> 已有策略</h6></div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0"><i class="bi bi-list"></i> 已有策略</h6>
+                <span class="text-muted small" id="strategy-count"></span>
+            </div>
             <div class="card-body p-0">
-                <table class="table table-hover mb-0">
-                    <thead><tr><th>名称</th><th>类型</th><th>交易对</th><th>周期</th><th>资金</th><th>状态</th><th>操作</th></tr></thead>
-                    <tbody id="strategy-list">
-                        <tr><td colspan="7" class="loading">加载中...</td></tr>
-                    </tbody>
-                </table>
+                <div id="strategy-cards" class="p-3">
+                    <div class="loading">加载中...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -115,55 +145,92 @@
 {% block scripts %}
 <script>
 const typeNames = {
-    ai_multi_factor: '🧠 AI 多因子',
-    lstm: '🧠 LSTM',
-    transformer: '🧠 Transformer',
-    rl_ppo: '🎮 RL PPO',
-    ai_grid: '📐 AI 网格',
-    smart_dca: '💰 智能 DCA',
-    funding_arb: '🔄 费率套利',
-    stat_arb: '📊 统计套利',
-    macd_cross: 'MACD 金叉/死叉',
-    rsi_reversal: 'RSI 超买超卖',
-    bollinger_breakout: '布林带突破',
-    dual_ma: '双均线交叉',
+    ai_multi_factor: '🧠 AI 多因子', lstm: '🧠 LSTM', transformer: '🧠 Transformer',
+    rl_ppo: '🎮 RL PPO', ai_grid: '📐 AI 网格', smart_dca: '💰 智能 DCA',
+    funding_arb: '🔄 费率套利', stat_arb: '📊 统计套利',
+    macd_cross: '📈 MACD', rsi_reversal: '📈 RSI', bollinger_breakout: '📈 布林带', dual_ma: '📈 双均线',
 };
 
 async function loadStrategies() {
     const data = await API.get('/api/strategies');
-    const tbody = document.getElementById('strategy-list');
     const entries = Object.entries(data);
+    const container = document.getElementById('strategy-cards');
+    document.getElementById('strategy-count').textContent = `${entries.length} 个策略`;
 
     if (entries.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">暂无策略</td></tr>';
+        container.innerHTML = '<div class="text-center py-4 text-muted">暂无策略，使用左侧表单创建一个</div>';
         return;
     }
 
-    tbody.innerHTML = entries.map(([sid, s]) => `
-        <tr>
-            <td><strong>${s.name}</strong></td>
-            <td>${typeNames[s.type] || s.type}</td>
-            <td>${s.symbol}</td>
-            <td>${s.timeframe}</td>
-            <td>${fmt(s.capital)}</td>
-            <td><span class="badge ${s.status==='running'?'badge-running':'badge-stopped'}">${s.status==='running'?'运行中':'已停止'}</span></td>
-            <td>
-                <button class="btn btn-sm ${s.status==='running'?'btn-outline-danger':'btn-outline-success'}"
-                    onclick="toggleStrategy('${sid}', '${s.status}')">
-                    ${s.status==='running'?'停止':'启动'}
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="deleteStrategy('${sid}')">删除</button>
-            </td>
-        </tr>`).join('');
+    container.innerHTML = entries.map(([sid, s]) => {
+        const ls = s.live_status || {};
+        const pos = (ls.positions || {})[s.symbol];
+        const isRunning = s.status === 'running';
+        const pnl = pos ? pos.pnl_pct || 0 : 0;
+        const signal = ls.last_signal || 'hold';
+        const kelly = ls.kelly_info;
+
+        return `
+        <div class="card strategy-card ${isRunning?'running':''} mb-2">
+            <div class="card-body py-2 px-3">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>${s.name}</strong>
+                        <span class="badge ${isRunning?'badge-running':'badge-stopped'} ms-2">${isRunning?'运行中':'已停止'}</span>
+                        <span class="param-badge">${typeNames[s.type]||s.type}</span>
+                    </div>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm ${isRunning?'btn-outline-danger':'btn-outline-success'}"
+                            onclick="toggleStrategy('${sid}','${s.status}')">${isRunning?'停止':'启动'}</button>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="deleteStrategy('${sid}')">
+                            <i class="bi bi-trash"></i></button>
+                    </div>
+                </div>
+                <div class="row mt-2 text-center" style="font-size:0.82rem;">
+                    <div class="col-3">
+                        <div class="text-muted">交易对</div>
+                        <strong>${s.symbol}</strong>
+                    </div>
+                    <div class="col-2">
+                        <div class="text-muted">周期</div>
+                        <strong>${s.timeframe}</strong>
+                    </div>
+                    <div class="col-2">
+                        <div class="text-muted">信号</div>
+                        <strong class="${signal==='buy'?'green':signal==='sell'?'red':''}">${signal.toUpperCase()}</strong>
+                    </div>
+                    <div class="col-2">
+                        <div class="text-muted">盈亏</div>
+                        <strong class="${pnlClass(pnl)}">${pos?pnlSign(pnl)+'%':'--'}</strong>
+                    </div>
+                    <div class="col-3">
+                        <div class="text-muted">资金</div>
+                        <strong>${fmt(ls.equity||s.capital)}</strong>
+                        ${kelly?`<div class="text-muted" style="font-size:0.7rem">凯利:${fmt(kelly.position_pct||0,1)}%</div>`:''}
+                    </div>
+                </div>
+                ${pos?`
+                <div class="mt-2 p-2 rounded" style="background:rgba(0,0,0,0.03);font-size:0.8rem;">
+                    <span class="${pos.side==='long'?'green':'red'}">${pos.side==='long'?'🟢 做多':'🔴 做空'}</span>
+                    · 入场 ${fmt(pos.entry_price)} → 现价 ${fmt(pos.current_price)}
+                    · 数量 ${fmt(pos.size, 4)}
+                </div>`:''}
+                <div class="mt-1" style="font-size:0.7rem;color:var(--text-dim);">
+                    止损${s.stop_loss_pct}% · 止盈${s.take_profit_pct}% · 追踪${s.trailing_stop_pct}%
+                    · 杠杆${s.leverage}x · ${s.paper?'📝模拟':'💰实盘'}
+                </div>
+            </div>
+        </div>`;
+    }).join('');
 }
 
-async function toggleStrategy(sid, currentStatus) {
-    if (currentStatus === 'running') {
+async function toggleStrategy(sid, status) {
+    if (status === 'running') {
         await API.post(`/api/live/stop/${sid}`);
-        toast('策略已停止', 'warning');
+        toast('已停止', 'warning');
     } else {
         const r = await API.post(`/api/live/start/${sid}`);
-        if (r.ok) toast('策略已启动', 'success');
+        if (r.ok) toast('已启动 ✅', 'success');
         else toast(r.error || '启动失败', 'danger');
     }
     loadStrategies();
@@ -176,6 +243,56 @@ async function deleteStrategy(sid) {
     loadStrategies();
 }
 
+// 信号预览
+document.getElementById('btn-preview').onclick = async () => {
+    const symbol = document.getElementById('s-symbol').value;
+    const type = document.getElementById('s-type').value;
+    const timeframe = document.getElementById('s-timeframe').value;
+    const preview = document.getElementById('signal-preview');
+
+    preview.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm"></div> 分析中...</div>';
+
+    try {
+        const params = {};
+        document.querySelectorAll('#params-body input, #params-body select').forEach(el => {
+            const key = el.dataset.param;
+            if (key) {
+                let val = el.value;
+                if (el.type === 'number') val = parseFloat(val) || 0;
+                params[key] = val;
+            }
+        });
+
+        const r = await API.post('/api/ai/analyze', { symbol, timeframe, params: { ...params, train_window: 200 } });
+        if (r.status === 'ok') {
+            const sig = r.signal || {};
+            const pred = r.prediction || {};
+            const cls = sig.action === 'buy' ? 'signal-buy' : sig.action === 'sell' ? 'signal-sell' : '';
+            preview.className = 'signal-preview ' + cls;
+            preview.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong class="${sig.action==='buy'?'green':sig.action==='sell'?'red':''}" style="font-size:1.1rem;">
+                            ${sig.action==='buy'?'🟢 建议买入':sig.action==='sell'?'🔴 建议卖出':'⚪ 观望'}
+                        </strong>
+                        <div class="text-muted small">价格 ${fmt(pred.current_price)} · 买入概率 ${pred.buy_probability}%</div>
+                    </div>
+                    <div style="width:120px;">
+                        <div class="text-muted small mb-1">置信度 ${sig.confidence||0}%</div>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width:${sig.confidence||0}%;background:${sig.action==='buy'?'var(--green)':sig.action==='sell'?'var(--red)':'var(--text-dim)'}"></div>
+                        </div>
+                    </div>
+                </div>`;
+        } else {
+            preview.innerHTML = `<div class="text-muted text-center">⚠️ ${r.error || '信号获取失败（数据不足）'}</div>`;
+        }
+    } catch (e) {
+        preview.innerHTML = `<div class="text-danger text-center">❌ ${e.message}</div>`;
+    }
+};
+
+// 创建策略
 document.getElementById('strategy-form').onsubmit = async (e) => {
     e.preventDefault();
     const data = {
@@ -191,124 +308,78 @@ document.getElementById('strategy-form').onsubmit = async (e) => {
         trailing_stop: document.getElementById('s-trailing').checked,
         trailing_stop_pct: document.getElementById('s-trail').value,
         paper: true,
+        params: {},
     };
-
-    // 从动态参数表单收集参数
-    data.params = {};
     document.querySelectorAll('#params-body input, #params-body select').forEach(el => {
         const key = el.dataset.param;
         if (key) {
             let val = el.value;
             if (el.type === 'number') val = parseFloat(val) || 0;
-            if (el.type === 'checkbox') val = el.checked;
             data.params[key] = val;
         }
     });
 
     const r = await API.post('/api/strategies', data);
     if (r.ok) {
-        toast(`策略创建成功 (ID: ${r.id})`, 'success');
+        toast(`策略创建成功 🎉`, 'success');
         loadStrategies();
     } else {
         toast('创建失败', 'danger');
     }
 };
 
-// 策略参数模板
+// 参数模板（同原版）
 const paramTemplates = {
-    ai_multi_factor: {
-        title: '🧠 AI 多因子参数',
-        fields: [
-            {key:'train_window',label:'训练窗口',type:'number',value:500,min:100},
-            {key:'retrain_interval',label:'重训间隔',type:'number',value:50,min:10},
-            {key:'buy_threshold',label:'买入阈值',type:'number',value:0.60,step:0.05,min:0.5,max:0.95},
-            {key:'sell_threshold',label:'卖出阈值',type:'number',value:0.40,step:0.05,min:0.05,max:0.5},
-            {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
-            {key:'n_estimators',label:'树数量',type:'number',value:100,min:50},
-            {key:'max_depth',label:'树深度',type:'number',value:5,min:2,max:10},
-        ]
-    },
-    lstm: {
-        title: '🧠 LSTM 参数',
-        fields: [
-            {key:'seq_len',label:'序列长度',type:'number',value:60,min:20,max:200},
-            {key:'train_window',label:'训练窗口',type:'number',value:1000,min:300},
-            {key:'epochs',label:'训练轮数',type:'number',value:50,min:10,max:200},
-            {key:'hidden_size',label:'隐藏层',type:'number',value:128,min:32},
-            {key:'num_layers',label:'LSTM层数',type:'number',value:2,min:1,max:4},
-            {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
-        ]
-    },
-    transformer: {
-        title: '🧠 Transformer 参数',
-        fields: [
-            {key:'seq_len',label:'序列长度',type:'number',value:60,min:20,max:200},
-            {key:'train_window',label:'训练窗口',type:'number',value:1000,min:300},
-            {key:'epochs',label:'训练轮数',type:'number',value:50,min:10,max:200},
-            {key:'d_model',label:'模型维度',type:'number',value:64,min:16},
-            {key:'nhead',label:'注意力头',type:'number',value:4,min:1,max:8},
-            {key:'num_layers',label:'层数',type:'number',value:3,min:1,max:6},
-            {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
-        ]
-    },
-    rl_ppo: {
-        title: '🎮 RL PPO 参数',
-        fields: [
-            {key:'n_episodes',label:'训练回合',type:'number',value:100,min:10,max:500},
-            {key:'hidden_size',label:'隐藏层',type:'number',value:128,min:32},
-            {key:'lr',label:'学习率',type:'number',value:0.0003,step:0.0001},
-            {key:'reward_type',label:'奖励函数',type:'select',value:'sharpe',options:[{v:'simple',l:'简单'},{v:'sharpe',l:'夏普'},{v:'risk_adjusted',l:'风险调整'}]},
-        ]
-    },
-    ai_grid: {
-        title: '📐 AI 网格参数',
-        fields: [
-            {key:'base_grids',label:'基础网格数',type:'number',value:10,min:4,max:30},
-            {key:'atr_multiplier',label:'ATR倍数',type:'number',value:2.0,step:0.5,min:0.5},
-            {key:'invest_per_grid_pct',label:'每格仓位%',type:'number',value:10,min:1,max:50},
-        ]
-    },
-    smart_dca: {
-        title: '💰 智能 DCA 参数',
-        fields: [
-            {key:'base_invest_pct',label:'基础投资%',type:'number',value:5,min:1,max:20},
-            {key:'interval_hours',label:'定投间隔(时)',type:'number',value:24,min:1},
-            {key:'rsi_oversold',label:'RSI超卖线',type:'number',value:30,min:10,max:40},
-            {key:'rsi_overbought',label:'RSI超买线',type:'number',value:70,min:60,max:90},
-            {key:'max_invest_pct',label:'最大投资%',type:'number',value:15,min:5,max:50},
-            {key:'pause_rsi',label:'暂停RSI',type:'number',value:85,min:75,max:95},
-        ]
-    },
-    funding_arb: {
-        title: '🔄 资金费率套利参数',
-        fields: [
-            {key:'open_threshold',label:'开仓阈值(年化)',type:'number',value:0.10,step:0.05,min:0.05},
-            {key:'close_threshold',label:'平仓阈值(年化)',type:'number',value:0.03,step:0.01,min:0.01},
-        ]
-    },
-    stat_arb: {
-        title: '📊 统计套利参数',
-        fields: [
-            {key:'zscore_period',label:'Z-score周期',type:'number',value:20,min:10,max:60},
-            {key:'zscore_threshold',label:'Z-score阈值',type:'number',value:2.0,step:0.5,min:1.0,max:3.0},
-            {key:'lookback',label:'回看窗口',type:'number',value:60,min:20},
-        ]
-    },
-    rsi_reversal: {
-        title: 'RSI 参数',
-        fields: [
-            {key:'oversold',label:'超卖线',type:'number',value:30,min:10,max:40},
-            {key:'overbought',label:'超买线',type:'number',value:70,min:60,max:90},
-        ]
-    },
-    dual_ma: {
-        title: '双均线参数',
-        fields: [
-            {key:'fast_period',label:'快线周期',type:'number',value:10,min:3,max:30},
-            {key:'slow_period',label:'慢线周期',type:'number',value:30,min:10,max:100},
-            {key:'ma_type',label:'均线类型',type:'select',value:'ema',options:[{v:'ema',l:'EMA'},{v:'sma',l:'SMA'}]},
-        ]
-    },
+    ai_multi_factor: { title:'🧠 AI 多因子参数', fields:[
+        {key:'train_window',label:'训练窗口',type:'number',value:500,min:100},
+        {key:'retrain_interval',label:'重训间隔',type:'number',value:50,min:10},
+        {key:'buy_threshold',label:'买入阈值',type:'number',value:0.60,step:0.05,min:0.5,max:0.95},
+        {key:'sell_threshold',label:'卖出阈值',type:'number',value:0.40,step:0.05,min:0.05,max:0.5},
+        {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
+    ]},
+    lstm: { title:'🧠 LSTM 参数', fields:[
+        {key:'seq_len',label:'序列长度',type:'number',value:60,min:20},
+        {key:'train_window',label:'训练窗口',type:'number',value:1000,min:300},
+        {key:'epochs',label:'训练轮数',type:'number',value:50,min:10},
+        {key:'hidden_size',label:'隐藏层',type:'number',value:128,min:32},
+    ]},
+    transformer: { title:'🧠 Transformer 参数', fields:[
+        {key:'seq_len',label:'序列长度',type:'number',value:60,min:20},
+        {key:'train_window',label:'训练窗口',type:'number',value:1000,min:300},
+        {key:'epochs',label:'训练轮数',type:'number',value:50,min:10},
+        {key:'d_model',label:'模型维度',type:'number',value:64,min:16},
+        {key:'nhead',label:'注意力头',type:'number',value:4,min:1,max:8},
+        {key:'num_layers',label:'层数',type:'number',value:3,min:1,max:6},
+    ]},
+    rl_ppo: { title:'🎮 RL PPO 参数', fields:[
+        {key:'n_episodes',label:'训练回合',type:'number',value:100,min:10},
+        {key:'hidden_size',label:'隐藏层',type:'number',value:128,min:32},
+        {key:'lr',label:'学习率',type:'number',value:0.0003,step:0.0001},
+    ]},
+    ai_grid: { title:'📐 AI 网格参数', fields:[
+        {key:'base_grids',label:'基础网格数',type:'number',value:10,min:4,max:30},
+        {key:'atr_multiplier',label:'ATR倍数',type:'number',value:2.0,step:0.5},
+    ]},
+    smart_dca: { title:'💰 智能 DCA 参数', fields:[
+        {key:'base_invest_pct',label:'基础投资%',type:'number',value:5,min:1,max:20},
+        {key:'interval_hours',label:'定投间隔(时)',type:'number',value:24,min:1},
+    ]},
+    funding_arb: { title:'🔄 费率套利参数', fields:[
+        {key:'open_threshold',label:'开仓阈值(年化)',type:'number',value:0.10,step:0.05},
+    ]},
+    stat_arb: { title:'📊 统计套利参数', fields:[
+        {key:'zscore_period',label:'Z-score周期',type:'number',value:20,min:10},
+        {key:'zscore_threshold',label:'Z-score阈值',type:'number',value:2.0,step:0.5},
+    ]},
+    rsi_reversal: { title:'RSI 参数', fields:[
+        {key:'oversold',label:'超卖线',type:'number',value:30,min:10,max:40},
+        {key:'overbought',label:'超买线',type:'number',value:70,min:60,max:90},
+    ]},
+    dual_ma: { title:'双均线参数', fields:[
+        {key:'fast_period',label:'快线',type:'number',value:10,min:3,max:30},
+        {key:'slow_period',label:'慢线',type:'number',value:30,min:10,max:100},
+        {key:'ma_type',label:'类型',type:'select',value:'ema',options:[{v:'ema',l:'EMA'},{v:'sma',l:'SMA'}]},
+    ]},
 };
 
 function renderParams(type) {
@@ -316,18 +387,13 @@ function renderParams(type) {
     const title = document.getElementById('params-title');
     const body = document.getElementById('params-body');
     const container = document.getElementById('params-container');
-
-    if (!tmpl) {
-        container.style.display = 'none';
-        return;
-    }
+    if (!tmpl) { container.style.display = 'none'; return; }
     container.style.display = 'block';
     title.innerHTML = `<i class="bi bi-sliders"></i> ${tmpl.title}`;
-
     let html = '<div class="row">';
     tmpl.fields.forEach(f => {
         if (f.type === 'select') {
-            html += `<div class="col-6 mb-2"><label class="form-label small">${f.label}</label><select class="form-select form-select-sm" data-param="${f.key}">${f.options.map(o => `<option value="${o.v}" ${o.v===f.value?'selected':''}>${o.l}</option>`).join('')}</select></div>`;
+            html += `<div class="col-6 mb-2"><label class="form-label small">${f.label}</label><select class="form-select form-select-sm" data-param="${f.key}">${f.options.map(o=>`<option value="${o.v}" ${o.v===f.value?'selected':''}>${o.l}</option>`).join('')}</select></div>`;
         } else {
             html += `<div class="col-6 mb-2"><label class="form-label small">${f.label}</label><input type="number" class="form-control form-control-sm" data-param="${f.key}" value="${f.value}" ${f.step?'step="'+f.step+'"':''} ${f.min?'min="'+f.min+'"':''} ${f.max?'max="'+f.max+'"':''}></div>`;
         }
@@ -336,11 +402,9 @@ function renderParams(type) {
     body.innerHTML = html;
 }
 
-// 策略类型切换
-document.getElementById('s-type').onchange = function() {
-    renderParams(this.value);
-};
+document.getElementById('s-type').onchange = function() { renderParams(this.value); };
 document.getElementById('s-type').dispatchEvent(new Event('change'));
 loadStrategies();
+setInterval(loadStrategies, 10000);
 </script>
 {% endblock %}

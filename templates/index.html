@@ -1,8 +1,42 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — MyTradingPlatform{% endblock %}
 
+{% block head %}
+<!-- TradingView Lightweight Charts -->
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+    .kline-toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .kline-toolbar .tf-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+        background: transparent; color: var(--text-dim); cursor: pointer; font-size: 0.78rem; transition: all 0.2s; }
+    .kline-toolbar .tf-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .kline-toolbar .tf-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+    .symbol-select { background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+        border-radius: 6px; padding: 4px 8px; font-size: 0.85rem; }
+    #kline-chart { width: 100%; border-radius: 0 0 12px 12px; overflow: hidden; }
+    .price-display { font-size: 1.6rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+    .price-change { font-size: 0.9rem; margin-left: 8px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+    .mini-stat { text-align: center; padding: 0.8rem; }
+    .mini-stat .val { font-size: 1.2rem; font-weight: 600; }
+    .mini-stat .lbl { font-size: 0.75rem; color: var(--text-dim); margin-top: 2px; }
+    .indicator-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+    .indicator-tag { font-size: 0.72rem; padding: 3px 8px; border-radius: 4px;
+        background: rgba(13,110,253,0.1); color: var(--blue); }
+    .position-row { transition: background 0.2s; }
+    .position-row:hover { background: var(--bg-hover); }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+        display: inline-block; animation: pulse 1.5s infinite; margin-right: 4px; }
+    .ws-status { font-size: 0.7rem; padding: 2px 8px; border-radius: 10px; }
+    .ws-connected { background: rgba(25,135,84,0.15); color: var(--green); }
+    .ws-disconnected { background: rgba(220,53,69,0.15); color: var(--red); }
+    .ws-polling { background: rgba(255,193,7,0.15); color: #b8860b; }
+    .perf-chart { height: 60px; }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="row g-3 mb-4">
+<!-- 顶行：核心指标 -->
+<div class="row g-3 mb-3">
     <div class="col-md-3">
         <div class="card stat-card">
             <div class="stat-value green" id="total-equity">--</div>
@@ -15,39 +49,102 @@
             <div class="stat-label">今日盈亏</div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card stat-card">
             <div class="stat-value blue" id="active-strategies">0</div>
-            <div class="stat-label">运行中策略</div>
+            <div class="stat-label">运行策略</div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-2">
         <div class="card stat-card">
             <div class="stat-value" id="open-positions">0</div>
-            <div class="stat-label">持仓数</div>
+            <div class="stat-label">持仓中</div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card stat-card">
+            <div class="stat-value" id="win-rate">--</div>
+            <div class="stat-label">胜率</div>
         </div>
     </div>
 </div>
 
+<!-- 实时K线图 -->
+<div class="row g-3 mb-3">
+    <div class="col-md-9">
+        <div class="card">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <div class="d-flex align-items-center gap-3">
+                        <select class="symbol-select" id="chart-symbol">
+                            <option value="BTC/USDT">BTC/USDT</option>
+                            <option value="ETH/USDT">ETH/USDT</option>
+                            <option value="SOL/USDT">SOL/USDT</option>
+                            <option value="BNB/USDT">BNB/USDT</option>
+                            <option value="XRP/USDT">XRP/USDT</option>
+                            <option value="DOGE/USDT">DOGE/USDT</option>
+                            <option value="ADA/USDT">ADA/USDT</option>
+                            <option value="AVAX/USDT">AVAX/USDT</option>
+                        </select>
+                        <div class="price-display">
+                            <span id="chart-price">--</span>
+                            <span class="price-change" id="chart-change"></span>
+                        </div>
+                        <span class="ws-status ws-polling" id="ws-badge">REST</span>
+                    </div>
+                    <div class="kline-toolbar">
+                        <button class="tf-btn" data-tf="1m">1m</button>
+                        <button class="tf-btn" data-tf="5m">5m</button>
+                        <button class="tf-btn" data-tf="15m">15m</button>
+                        <button class="tf-btn active" data-tf="1h">1H</button>
+                        <button class="tf-btn" data-tf="4h">4H</button>
+                        <button class="tf-btn" data-tf="1d">1D</button>
+                    </div>
+                </div>
+            </div>
+            <div id="kline-chart" style="height:420px;"></div>
+        </div>
+    </div>
+
+    <!-- 右侧：市场概览 -->
+    <div class="col-md-3">
+        <div class="card mb-3">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-bar-chart-line"></i> 技术指标</h6></div>
+            <div class="card-body">
+                <div class="stat-grid" id="indicators-grid">
+                    <div class="mini-stat"><div class="val" id="ind-rsi">--</div><div class="lbl">RSI(14)</div></div>
+                    <div class="mini-stat"><div class="val" id="ind-macd">--</div><div class="lbl">MACD</div></div>
+                    <div class="mini-stat"><div class="val" id="ind-vol">--</div><div class="lbl">24h Vol</div></div>
+                    <div class="mini-stat"><div class="val" id="ind-high">--</div><div class="lbl">24h 高</div></div>
+                    <div class="mini-stat"><div class="val" id="ind-low">--</div><div class="lbl">24h 低</div></div>
+                    <div class="mini-stat"><div class="val" id="ind-atr">--</div><div class="lbl">ATR(14)</div></div>
+                </div>
+                <div class="indicator-tags mt-2" id="signal-tags"></div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-lightning"></i> 快速操作</h6></div>
+            <div class="card-body d-grid gap-2">
+                <a href="/strategy" class="btn btn-primary btn-sm"><i class="bi bi-plus-lg"></i> 创建策略</a>
+                <a href="/backtest" class="btn btn-outline-primary btn-sm"><i class="bi bi-clock-history"></i> 运行回测</a>
+                <a href="/ai" class="btn btn-outline-purple btn-sm" style="border-color:var(--purple);color:var(--purple)"><i class="bi bi-robot"></i> AI 分析</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 底部：策略列表 + 持仓 -->
 <div class="row g-3">
-    <div class="col-md-8">
+    <div class="col-md-7">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <h6 class="mb-0"><i class="bi bi-broadcast"></i> 实盘策略状态</h6>
-                <a href="/live" class="btn btn-sm btn-outline-primary">查看全部</a>
+                <h6 class="mb-0"><i class="bi bi-cpu"></i> 实盘策略</h6>
+                <a href="/strategy" class="btn btn-sm btn-outline-primary">管理</a>
             </div>
             <div class="card-body p-0">
                 <table class="table table-hover mb-0">
                     <thead>
-                        <tr>
-                            <th>策略</th>
-                            <th>交易对</th>
-                            <th>方向</th>
-                            <th>入场价</th>
-                            <th>当前价</th>
-                            <th>盈亏</th>
-                            <th>状态</th>
-                        </tr>
+                        <tr><th>策略</th><th>交易对</th><th>信号</th><th>仓位</th><th>盈亏</th><th>状态</th><th>操作</th></tr>
                     </thead>
                     <tbody id="strategies-table">
                         <tr><td colspan="7" class="loading">加载中...</td></tr>
@@ -56,33 +153,14 @@
             </div>
         </div>
     </div>
-
-    <div class="col-md-4">
-        <div class="card mb-3">
-            <div class="card-header">
-                <h6 class="mb-0"><i class="bi bi-lightning"></i> 快速操作</h6>
-            </div>
-            <div class="card-body">
-                <a href="/strategy" class="btn btn-primary w-100 mb-2">
-                    <i class="bi bi-plus-lg"></i> 创建策略
-                </a>
-                <a href="/backtest" class="btn btn-outline-primary w-100 mb-2">
-                    <i class="bi bi-clock-history"></i> 运行回测
-                </a>
-                <a href="/settings" class="btn btn-outline-secondary w-100">
-                    <i class="bi bi-gear"></i> 配置交易所
-                </a>
-            </div>
-        </div>
-
+    <div class="col-md-5">
         <div class="card">
-            <div class="card-header">
-                <h6 class="mb-0"><i class="bi bi-journal-text"></i> 最近交易</h6>
-            </div>
-            <div class="card-body p-0" style="max-height:300px;overflow-y:auto;">
-                <div id="recent-trades" class="list-group list-group-flush">
-                    <div class="loading">暂无交易记录</div>
-                </div>
+            <div class="card-header"><h6 class="mb-0"><i class="bi bi-journal-text"></i> 最近交易</h6></div>
+            <div class="card-body p-0" style="max-height:350px;overflow-y:auto;">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>时间</th><th>策略</th><th>方向</th><th>价格</th><th>盈亏</th></tr></thead>
+                    <tbody id="trades-table"><tr><td colspan="5" class="loading">暂无</td></tr></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -91,18 +169,220 @@
 
 {% block scripts %}
 <script>
+// ================================================================
+// K线图
+// ================================================================
+let chart, candleSeries, volumeSeries, wsInterval;
+let currentTimeframe = '1h';
+let currentSymbol = 'BTC/USDT';
+let wsConnected = false;
+
+function initChart() {
+    const container = document.getElementById('kline-chart');
+    chart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: 420,
+        layout: { background: { type: 'solid', color: '#f8f9fa' }, textColor: '#212529', fontSize: 12 },
+        grid: { vertLines: { color: '#e9ecef' }, horzLines: { color: '#e9ecef' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#dee2e6' },
+        timeScale: { borderColor: '#dee2e6', timeVisible: true, secondsVisible: false },
+    });
+
+    candleSeries = chart.addCandlestickSeries({
+        upColor: '#198754', downColor: '#dc3545',
+        borderUpColor: '#198754', borderDownColor: '#dc3545',
+        wickUpColor: '#198754', wickDownColor: '#dc3545',
+    });
+
+    volumeSeries = chart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: '',
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+
+    // 响应式
+    window.addEventListener('resize', () => {
+        chart.applyOptions({ width: container.clientWidth });
+    });
+}
+
+async function loadKlineData() {
+    const symbol = currentSymbol.replace('/', '_');
+    try {
+        const data = await API.get(`/api/market/kline/${symbol}?timeframe=${currentTimeframe}&limit=300`);
+        if (!Array.isArray(data) || data.length === 0) return;
+
+        const candles = data.map(d => ({
+            time: new Date(d.time).getTime() / 1000,
+            open: d.open, high: d.high, low: d.low, close: d.close,
+        }));
+        const volumes = data.map(d => ({
+            time: new Date(d.time).getTime() / 1000,
+            value: d.volume,
+            color: d.close >= d.open ? 'rgba(25,135,84,0.3)' : 'rgba(220,53,69,0.3)',
+        }));
+
+        candleSeries.setData(candles);
+        volumeSeries.setData(volumes);
+        chart.timeScale().scrollToRealTime();
+
+        // 更新指标
+        const last = data[data.length - 1];
+        const first = data[0];
+        updatePrice(last.close, first.open, last);
+        updateIndicators(data);
+    } catch (e) {
+        console.error('Kline load error:', e);
+    }
+}
+
+// WebSocket 实时更新
+function connectWS() {
+    const wsSym = currentSymbol.replace('/', '').toLowerCase();
+    const wsUrl = `wss://fstream.binance.com/ws/${wsSym}@kline_${currentTimeframe}`;
+
+    try {
+        const ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+            wsConnected = true;
+            const badge = document.getElementById('ws-badge');
+            badge.textContent = 'WS 实时';
+            badge.className = 'ws-status ws-connected';
+        };
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const k = data.k;
+            if (!k) return;
+
+            const candle = {
+                time: k.t / 1000,
+                open: parseFloat(k.o), high: parseFloat(k.h),
+                low: parseFloat(k.l), close: parseFloat(k.c),
+            };
+            const vol = {
+                time: k.t / 1000,
+                value: parseFloat(k.v),
+                color: candle.close >= candle.open ? 'rgba(25,135,84,0.3)' : 'rgba(220,53,69,0.3)',
+            };
+
+            candleSeries.update(candle);
+            volumeSeries.update(vol);
+            updatePrice(candle.close, null, { rsi: null });
+        };
+        ws.onclose = () => {
+            wsConnected = false;
+            const badge = document.getElementById('ws-badge');
+            badge.textContent = 'REST';
+            badge.className = 'ws-status ws-polling';
+            // 5秒后重连
+            setTimeout(connectWS, 5000);
+        };
+        ws.onerror = () => ws.close();
+    } catch (e) {
+        console.error('WS error:', e);
+    }
+}
+
+function disconnectWS() {
+    wsConnected = false;
+}
+
+function updatePrice(price, open, data) {
+    document.getElementById('chart-price').textContent = fmt(price);
+    if (open) {
+        const change = (price / open - 1) * 100;
+        const el = document.getElementById('chart-change');
+        el.textContent = (change >= 0 ? '+' : '') + fmt(change) + '%';
+        el.className = 'price-change ' + (change >= 0 ? 'green' : 'red');
+    }
+    document.getElementById('header-price').innerHTML = `<strong>${currentSymbol}</strong> ${fmt(price)}`;
+}
+
+function updateIndicators(data) {
+    if (data.length < 20) return;
+    const last = data[data.length - 1];
+    const closes = data.map(d => d.close);
+
+    // RSI
+    if (last.rsi != null) {
+        const rsiEl = document.getElementById('ind-rsi');
+        rsiEl.textContent = fmt(last.rsi, 1);
+        rsiEl.style.color = last.rsi > 70 ? 'var(--red)' : last.rsi < 30 ? 'var(--green)' : '';
+    }
+
+    // MACD
+    if (last.macd != null) {
+        document.getElementById('ind-macd').textContent = fmt(last.macd, 4);
+    }
+
+    // 24h stats
+    const last24 = data.slice(-24);
+    const vol24 = last24.reduce((s, d) => s + d.volume, 0);
+    document.getElementById('ind-vol').textContent = vol24 > 1e6 ? fmt(vol24/1e6, 1)+'M' : fmt(vol24/1e3, 1)+'K';
+    document.getElementById('ind-high').textContent = fmt(Math.max(...last24.map(d=>d.high)));
+    document.getElementById('ind-low').textContent = fmt(Math.min(...last24.map(d=>d.low)));
+
+    // ATR (简易)
+    let trs = [];
+    for (let i = Math.max(1, data.length-15); i < data.length; i++) {
+        trs.push(Math.max(data[i].high-data[i].low,
+            Math.abs(data[i].high-data[i-1].close),
+            Math.abs(data[i].low-data[i-1].close)));
+    }
+    const atr = trs.reduce((s,v)=>s+v,0)/trs.length;
+    document.getElementById('ind-atr').textContent = fmt(atr, 2);
+
+    // 信号标签
+    const tags = [];
+    if (last.rsi > 70) tags.push({text:'RSI 超买', cls:'background:rgba(220,53,69,0.15);color:var(--red)'});
+    if (last.rsi < 30) tags.push({text:'RSI 超卖', cls:'background:rgba(25,135,84,0.15);color:var(--green)'});
+    if (last.macd > 0) tags.push({text:'MACD 多头', cls:'background:rgba(25,135,84,0.15);color:var(--green)'});
+    if (last.macd < 0) tags.push({text:'MACD 空头', cls:'background:rgba(220,53,69,0.15);color:var(--red)'});
+
+    document.getElementById('signal-tags').innerHTML = tags.map(t =>
+        `<span class="indicator-tag" style="${t.cls}">${t.text}</span>`
+    ).join('');
+}
+
+// 时间周期切换
+document.querySelectorAll('.tf-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        currentTimeframe = this.dataset.tf;
+        loadKlineData();
+        // 重连 WS
+        disconnectWS();
+        setTimeout(connectWS, 500);
+    });
+});
+
+// 交易对切换
+document.getElementById('chart-symbol').addEventListener('change', function() {
+    currentSymbol = this.value;
+    loadKlineData();
+    disconnectWS();
+    setTimeout(connectWS, 500);
+});
+
+// ================================================================
+// 策略 + 交易列表
+// ================================================================
 async function loadDashboard() {
     try {
         const strategies = await API.get('/api/strategies');
         const entries = Object.entries(strategies);
 
-        // 统计
-        let totalEquity = 0, runningCount = 0, posCount = 0, allTrades = [];
+        let totalEquity = 0, runningCount = 0, posCount = 0;
+        let totalTrades = 0, winTrades = 0;
+        const allTrades = [];
         const tbody = document.getElementById('strategies-table');
-        tbody.innerHTML = '';
 
         if (entries.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">暂无策略，<a href="/strategy">创建一个</a></td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-3 text-muted">暂无策略 · <a href="/strategy">创建一个</a></td></tr>';
+        } else {
+            tbody.innerHTML = '';
         }
 
         for (const [sid, s] of entries) {
@@ -116,51 +396,79 @@ async function loadDashboard() {
             totalEquity += ls.equity || s.capital;
 
             if (ls.trades) {
-                for (const t of ls.trades.slice(-5)) {
+                for (const t of ls.trades.slice(-10)) {
                     allTrades.push({ ...t, strategy: s.name, symbol: s.symbol });
+                    totalTrades++;
+                    if ((t.pnl || 0) > 0) winTrades++;
                 }
             }
 
             const pnl = pos ? pos.pnl_pct || 0 : 0;
+            const signal = ls.last_signal || 'hold';
+            const sigColor = signal === 'buy' ? 'green' : signal === 'sell' ? 'red' : 'text-dim';
+
             tbody.innerHTML += `
-                <tr>
+                <tr class="position-row">
                     <td><strong>${s.name}</strong></td>
                     <td>${s.symbol}</td>
-                    <td>${pos ? (pos.side === 'long' ? '<span class="green">做多</span>' : '<span class="red">做空</span>') : '-'}</td>
-                    <td>${pos ? fmt(pos.entry_price) : '-'}</td>
-                    <td>${pos ? fmt(pos.current_price) : '-'}</td>
+                    <td><span class="${sigColor}">${signal.toUpperCase()}</span></td>
+                    <td>${pos ? (pos.side === 'long' ? '🟢多' : '🔴空') + ' ' + fmt(pos.size, 4) : '-'}</td>
                     <td class="${pnlClass(pnl)}">${pos ? pnlSign(pnl) + '%' : '-'}</td>
-                    <td><span class="badge ${isRunning ? 'badge-running' : 'badge-stopped'}">${isRunning ? '运行中' : '已停止'}</span></td>
+                    <td><span class="badge ${isRunning ? 'badge-running' : 'badge-stopped'}">
+                        ${isRunning ? '<span class="live-dot"></span>运行' : '停止'}</span></td>
+                    <td>
+                        <button class="btn btn-sm ${isRunning?'btn-outline-danger':'btn-outline-success'}"
+                            onclick="toggleStrategy('${sid}','${s.status}')">${isRunning?'停':'启'}</button>
+                    </td>
                 </tr>`;
         }
 
         document.getElementById('total-equity').textContent = fmt(totalEquity);
         document.getElementById('active-strategies').textContent = runningCount;
         document.getElementById('open-positions').textContent = posCount;
+        document.getElementById('win-rate').textContent = totalTrades > 0 ? fmt(winTrades/totalTrades*100,1)+'%' : '--';
 
         // 最近交易
-        const tradesEl = document.getElementById('recent-trades');
+        const tradesTbody = document.getElementById('trades-table');
         if (allTrades.length > 0) {
-            tradesEl.innerHTML = allTrades.slice(-10).reverse().map(t => `
-                <div class="list-group-item bg-transparent border-0 py-2">
-                    <div class="d-flex justify-content-between">
-                        <small class="text-muted">${t.strategy} · ${t.symbol}</small>
-                        <small class="text-muted">${(t.time || '').slice(11, 19)}</small>
-                    </div>
-                    <div>
-                        <span class="${t.type?.includes('open') || t.type?.includes('buy') ? 'green' : 'red'}">${t.type}</span>
-                        @ ${fmt(t.price)}
-                        ${t.pnl !== undefined ? `<span class="${pnlClass(t.pnl)} float-end">${pnlSign(t.pnl)}</span>` : ''}
-                    </div>
-                </div>`).join('');
+            tradesTbody.innerHTML = allTrades.slice(-15).reverse().map(t => {
+                const side = (t.type||'').includes('buy') || (t.type||'').includes('open') || t.side === 'long';
+                return `<tr>
+                    <td><small class="text-muted">${(t.time||'').slice(11,19)}</small></td>
+                    <td><small>${t.strategy}</small></td>
+                    <td><span class="${side?'green':'red'}"><small>${side?'做多':'做空'}</small></span></td>
+                    <td><small>${fmt(t.exit_price||t.entry_price||t.price)}</small></td>
+                    <td class="${pnlClass(t.pnl||0)}"><small>${t.pnl!==undefined?pnlSign(t.pnl):'-'}</small></td>
+                </tr>`;
+            }).join('');
         }
 
     } catch (e) {
-        console.error(e);
+        console.error('Dashboard error:', e);
     }
 }
 
+async function toggleStrategy(sid, status) {
+    if (status === 'running') {
+        await API.post(`/api/live/stop/${sid}`);
+        toast('已停止', 'warning');
+    } else {
+        const r = await API.post(`/api/live/start/${sid}`);
+        if (r.ok) toast('已启动 ✅', 'success');
+        else toast(r.error || '启动失败', 'danger');
+    }
+    loadDashboard();
+}
+
+// ================================================================
+// 初始化
+// ================================================================
+initChart();
+loadKlineData();
+connectWS();
 loadDashboard();
-setInterval(loadDashboard, 10000);
+
+// 刷新策略列表
+setInterval(loadDashboard, 8000);
 </script>
 {% endblock %}
