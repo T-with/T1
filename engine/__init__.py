@@ -5,9 +5,10 @@ from .core import (
     Trade, Position
 )
 from .data import (
-    DataManager, WebSocketFeed, OrderBookManager,
+    DataManager, OrderBookManager,
     KlineManager, TradeStreamManager, OrderBook,
-    Ticker, Trade as StreamTrade, data_manager
+    Ticker, Trade as StreamTrade, data_manager,
+    EventBus, RealtimeDataEngine, CompatFeed,
 )
 from .execution import (
     SmartOrderRouter, TWAPExecutor, VWAPExecutor,
