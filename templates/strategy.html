@@ -51,30 +51,9 @@
                             <option value="dual_ma">双均线交叉</option>
                         </select>
                     </div>
-                    <div class="mb-3" id="ai-params" style="border-left:3px solid var(--purple);padding-left:12px;">
-                        <label class="form-label"><i class="bi bi-cpu"></i> AI 多因子参数</label>
-                        <div class="row">
-                            <div class="col-6 mb-2">
-                                <label class="form-label small">训练窗口</label>
-                                <input type="number" class="form-control form-control-sm" id="s-train-window" value="500" min="100">
-                            </div>
-                            <div class="col-6 mb-2">
-                                <label class="form-label small">重训间隔</label>
-                                <input type="number" class="form-control form-control-sm" id="s-retrain" value="50" min="10">
-                            </div>
-                            <div class="col-4 mb-2">
-                                <label class="form-label small">买入阈值</label>
-                                <input type="number" class="form-control form-control-sm" id="s-buy-th" value="0.60" step="0.05" min="0.5" max="0.95">
-                            </div>
-                            <div class="col-4 mb-2">
-                                <label class="form-label small">卖出阈值</label>
-                                <input type="number" class="form-control form-control-sm" id="s-sell-th" value="0.40" step="0.05" min="0.05" max="0.5">
-                            </div>
-                            <div class="col-4 mb-2">
-                                <label class="form-label small">树深度</label>
-                                <input type="number" class="form-control form-control-sm" id="s-max-depth" value="5" min="2" max="10">
-                            </div>
-                        </div>
+                    <div class="mb-3" id="params-container" style="border-left:3px solid var(--purple);padding-left:12px;">
+                        <label class="form-label" id="params-title"><i class="bi bi-sliders"></i> 策略参数</label>
+                        <div id="params-body"></div>
                     </div>
                     <div class="row">
                         <div class="col-4 mb-3">
@@ -214,18 +193,18 @@ document.getElementById('strategy-form').onsubmit = async (e) => {
         paper: true,
     };
 
-    // AI 多因子参数
-    if (data.type === 'ai_multi_factor') {
-        data.params = {
-            train_window: parseInt(document.getElementById('s-train-window').value) || 500,
-            retrain_interval: parseInt(document.getElementById('s-retrain').value) || 50,
-            buy_threshold: parseFloat(document.getElementById('s-buy-th').value) || 0.6,
-            sell_threshold: parseFloat(document.getElementById('s-sell-th').value) || 0.4,
-            max_depth: parseInt(document.getElementById('s-max-depth').value) || 5,
-            n_estimators: 100,
-            target_return: 0.002,
-        };
-    }
+    // 从动态参数表单收集参数
+    data.params = {};
+    document.querySelectorAll('#params-body input, #params-body select').forEach(el => {
+        const key = el.dataset.param;
+        if (key) {
+            let val = el.value;
+            if (el.type === 'number') val = parseFloat(val) || 0;
+            if (el.type === 'checkbox') val = el.checked;
+            data.params[key] = val;
+        }
+    });
+
     const r = await API.post('/api/strategies', data);
     if (r.ok) {
         toast(`策略创建成功 (ID: ${r.id})`, 'success');
@@ -235,14 +214,133 @@ document.getElementById('strategy-form').onsubmit = async (e) => {
     }
 };
 
-loadStrategies();
-
-// 根据策略类型显示/隐藏 AI 参数面板
-document.getElementById('s-type').onchange = function() {
-    document.getElementById('ai-params').style.display =
-        this.value === 'ai_multi_factor' ? 'block' : 'none';
+// 策略参数模板
+const paramTemplates = {
+    ai_multi_factor: {
+        title: '🧠 AI 多因子参数',
+        fields: [
+            {key:'train_window',label:'训练窗口',type:'number',value:500,min:100},
+            {key:'retrain_interval',label:'重训间隔',type:'number',value:50,min:10},
+            {key:'buy_threshold',label:'买入阈值',type:'number',value:0.60,step:0.05,min:0.5,max:0.95},
+            {key:'sell_threshold',label:'卖出阈值',type:'number',value:0.40,step:0.05,min:0.05,max:0.5},
+            {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
+            {key:'n_estimators',label:'树数量',type:'number',value:100,min:50},
+            {key:'max_depth',label:'树深度',type:'number',value:5,min:2,max:10},
+        ]
+    },
+    lstm: {
+        title: '🧠 LSTM 参数',
+        fields: [
+            {key:'seq_len',label:'序列长度',type:'number',value:60,min:20,max:200},
+            {key:'train_window',label:'训练窗口',type:'number',value:1000,min:300},
+            {key:'epochs',label:'训练轮数',type:'number',value:50,min:10,max:200},
+            {key:'hidden_size',label:'隐藏层',type:'number',value:128,min:32},
+            {key:'num_layers',label:'LSTM层数',type:'number',value:2,min:1,max:4},
+            {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
+        ]
+    },
+    transformer: {
+        title: '🧠 Transformer 参数',
+        fields: [
+            {key:'seq_len',label:'序列长度',type:'number',value:60,min:20,max:200},
+            {key:'train_window',label:'训练窗口',type:'number',value:1000,min:300},
+            {key:'epochs',label:'训练轮数',type:'number',value:50,min:10,max:200},
+            {key:'d_model',label:'模型维度',type:'number',value:64,min:16},
+            {key:'nhead',label:'注意力头',type:'number',value:4,min:1,max:8},
+            {key:'num_layers',label:'层数',type:'number',value:3,min:1,max:6},
+            {key:'target_return',label:'目标收益率',type:'number',value:0.002,step:0.001},
+        ]
+    },
+    rl_ppo: {
+        title: '🎮 RL PPO 参数',
+        fields: [
+            {key:'n_episodes',label:'训练回合',type:'number',value:100,min:10,max:500},
+            {key:'hidden_size',label:'隐藏层',type:'number',value:128,min:32},
+            {key:'lr',label:'学习率',type:'number',value:0.0003,step:0.0001},
+            {key:'reward_type',label:'奖励函数',type:'select',value:'sharpe',options:[{v:'simple',l:'简单'},{v:'sharpe',l:'夏普'},{v:'risk_adjusted',l:'风险调整'}]},
+        ]
+    },
+    ai_grid: {
+        title: '📐 AI 网格参数',
+        fields: [
+            {key:'base_grids',label:'基础网格数',type:'number',value:10,min:4,max:30},
+            {key:'atr_multiplier',label:'ATR倍数',type:'number',value:2.0,step:0.5,min:0.5},
+            {key:'invest_per_grid_pct',label:'每格仓位%',type:'number',value:10,min:1,max:50},
+        ]
+    },
+    smart_dca: {
+        title: '💰 智能 DCA 参数',
+        fields: [
+            {key:'base_invest_pct',label:'基础投资%',type:'number',value:5,min:1,max:20},
+            {key:'interval_hours',label:'定投间隔(时)',type:'number',value:24,min:1},
+            {key:'rsi_oversold',label:'RSI超卖线',type:'number',value:30,min:10,max:40},
+            {key:'rsi_overbought',label:'RSI超买线',type:'number',value:70,min:60,max:90},
+            {key:'max_invest_pct',label:'最大投资%',type:'number',value:15,min:5,max:50},
+            {key:'pause_rsi',label:'暂停RSI',type:'number',value:85,min:75,max:95},
+        ]
+    },
+    funding_arb: {
+        title: '🔄 资金费率套利参数',
+        fields: [
+            {key:'open_threshold',label:'开仓阈值(年化)',type:'number',value:0.10,step:0.05,min:0.05},
+            {key:'close_threshold',label:'平仓阈值(年化)',type:'number',value:0.03,step:0.01,min:0.01},
+        ]
+    },
+    stat_arb: {
+        title: '📊 统计套利参数',
+        fields: [
+            {key:'zscore_period',label:'Z-score周期',type:'number',value:20,min:10,max:60},
+            {key:'zscore_threshold',label:'Z-score阈值',type:'number',value:2.0,step:0.5,min:1.0,max:3.0},
+            {key:'lookback',label:'回看窗口',type:'number',value:60,min:20},
+        ]
+    },
+    rsi_reversal: {
+        title: 'RSI 参数',
+        fields: [
+            {key:'oversold',label:'超卖线',type:'number',value:30,min:10,max:40},
+            {key:'overbought',label:'超买线',type:'number',value:70,min:60,max:90},
+        ]
+    },
+    dual_ma: {
+        title: '双均线参数',
+        fields: [
+            {key:'fast_period',label:'快线周期',type:'number',value:10,min:3,max:30},
+            {key:'slow_period',label:'慢线周期',type:'number',value:30,min:10,max:100},
+            {key:'ma_type',label:'均线类型',type:'select',value:'ema',options:[{v:'ema',l:'EMA'},{v:'sma',l:'SMA'}]},
+        ]
+    },
 };
-// 初始化
+
+function renderParams(type) {
+    const tmpl = paramTemplates[type];
+    const title = document.getElementById('params-title');
+    const body = document.getElementById('params-body');
+    const container = document.getElementById('params-container');
+
+    if (!tmpl) {
+        container.style.display = 'none';
+        return;
+    }
+    container.style.display = 'block';
+    title.innerHTML = `<i class="bi bi-sliders"></i> ${tmpl.title}`;
+
+    let html = '<div class="row">';
+    tmpl.fields.forEach(f => {
+        if (f.type === 'select') {
+            html += `<div class="col-6 mb-2"><label class="form-label small">${f.label}</label><select class="form-select form-select-sm" data-param="${f.key}">${f.options.map(o => `<option value="${o.v}" ${o.v===f.value?'selected':''}>${o.l}</option>`).join('')}</select></div>`;
+        } else {
+            html += `<div class="col-6 mb-2"><label class="form-label small">${f.label}</label><input type="number" class="form-control form-control-sm" data-param="${f.key}" value="${f.value}" ${f.step?'step="'+f.step+'"':''} ${f.min?'min="'+f.min+'"':''} ${f.max?'max="'+f.max+'"':''}></div>`;
+        }
+    });
+    html += '</div>';
+    body.innerHTML = html;
+}
+
+// 策略类型切换
+document.getElementById('s-type').onchange = function() {
+    renderParams(this.value);
+};
 document.getElementById('s-type').dispatchEvent(new Event('change'));
+loadStrategies();
 </script>
 {% endblock %}
