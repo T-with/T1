@@ -208,11 +208,8 @@ class Indicators:
         delta = df[col].diff()
         gain = delta.where(delta > 0, 0.0).ewm(com=period-1, min_periods=period).mean()
         loss = (-delta.where(delta < 0, 0.0)).ewm(com=period-1, min_periods=period).mean()
-        # 修复：loss=0 时（全涨行情）RSI 应为 100，而非 NaN
-        rs = gain / loss.replace(0, float('nan'))
-        rsi = 100 - 100 / (1 + rs)
-        rsi = rsi.fillna(100)   # loss=0 → 纯涨势 → RSI=100
-        return rsi
+        rs = gain / loss
+        return 100 - 100 / (1 + rs)
 
     @staticmethod
     def macd(df, fast=12, slow=26, signal=9, col='close'):
@@ -239,34 +236,18 @@ class Indicators:
     @staticmethod
     def add_all(df):
         df = df.copy()
-        # 性能优化：缓存 close 系列，避免多次 df['close'] 查找
-        close = df['close']
-
-        # 均线（复用 close，减少 DataFrame 索引次数）
-        df['sma_10'] = close.rolling(10).mean()
-        df['sma_20'] = close.rolling(20).mean()
-        df['sma_50'] = close.rolling(50).mean()
-        df['ema_12'] = close.ewm(span=12, adjust=False).mean()
-        df['ema_26'] = close.ewm(span=26, adjust=False).mean()
-
-        # RSI（单次计算）
-        df['rsi'] = Indicators.rsi(df)
-
-        # MACD（复用 ema_12 / ema_26）
-        macd_line = df['ema_12'] - df['ema_26']
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        df['macd'] = macd_line
-        df['macd_signal'] = signal_line
-        df['macd_hist'] = macd_line - signal_line
-
-        # 布林带（复用 sma_20）
-        std20 = close.rolling(20).std()
-        df['bb_upper'] = df['sma_20'] + 2.0 * std20
-        df['bb_middle'] = df['sma_20']
-        df['bb_lower'] = df['sma_20'] - 2.0 * std20
-
-        # ATR
-        df['atr'] = Indicators.atr(df)
+        ind = Indicators()
+        df['sma_10'] = ind.sma(df, 10)
+        df['sma_20'] = ind.sma(df, 20)
+        df['sma_50'] = ind.sma(df, 50)
+        df['ema_12'] = ind.ema(df, 12)
+        df['ema_26'] = ind.ema(df, 26)
+        df['rsi'] = ind.rsi(df)
+        m, s, h = ind.macd(df)
+        df['macd'], df['macd_signal'], df['macd_hist'] = m, s, h
+        u, mid, l = ind.bollinger(df)
+        df['bb_upper'], df['bb_middle'], df['bb_lower'] = u, mid, l
+        df['atr'] = ind.atr(df)
         return df
 
 
@@ -371,8 +352,6 @@ class StrategyEngine:
         slow = params.get('slow_period', 30)
         ma_type = params.get('ma_type', 'ema')
         ind = Indicators()
-        # 修复：copy 避免修改调用方的 df
-        df = df.copy()
         if ma_type == 'ema':
             df['ma_f'] = ind.ema(df, fast)
             df['ma_s'] = ind.ema(df, slow)
@@ -1288,7 +1267,7 @@ class SmartDCAStrategy:
                 final_weight *= 0.7
             market_state = 'extreme_oversold'
         else:
-            market_state = f'rsi_{rsi_label}_vol_{vol_label}'
+            market_state = f'rsi_{rsi_label}_vol_{vol_vol if False else vol_label}'
 
         return {
             'final_weight': round(final_weight, 2),
@@ -1570,30 +1549,6 @@ _CACHE_DIR = DATA_DIR / 'cache'
 _CACHE_DIR.mkdir(exist_ok=True)
 _CACHE_TTL = 300  # 5分钟缓存
 
-# 内存 LRU 缓存（性能优化）：同一 session 免重复读磁盘
-# key → (expire_ts, DataFrame)
-_MEM_CACHE: Dict[str, tuple] = {}
-_MEM_CACHE_MAX = 64        # 最多保留 64 条（防内存膨胀）
-_MEM_CACHE_TTL = 60        # 内存缓存 60 秒
-
-
-def _mem_cache_get(key: str):
-    """从内存缓存读取，过期返回 None"""
-    item = _MEM_CACHE.get(key)
-    if item and item[0] > time.time():
-        return item[1]
-    _MEM_CACHE.pop(key, None)
-    return None
-
-
-def _mem_cache_set(key: str, data):
-    """写入内存缓存，超过上限时淘汰最旧的"""
-    if len(_MEM_CACHE) >= _MEM_CACHE_MAX:
-        # 淘汰最早过期的 key
-        oldest = min(_MEM_CACHE, key=lambda k: _MEM_CACHE[k][0])
-        del _MEM_CACHE[oldest]
-    _MEM_CACHE[key] = (time.time() + _MEM_CACHE_TTL, data)
-
 
 class ExchangeClient:
     def __init__(self, exchange_id='binance', api_key='', api_secret='', passphrase=''):
@@ -1630,13 +1585,8 @@ class ExchangeClient:
 
     def fetch_ohlcv(self, symbol, timeframe='1h', limit=500):
         key = self._cache_key(symbol, timeframe, limit=limit)
-        # 优先查内存缓存（避免重复读磁盘，提升 5-10x 速度）
-        mem = _mem_cache_get(key)
-        if mem is not None:
-            return mem
         cached = self._read_cache(key)
         if cached is not None:
-            _mem_cache_set(key, cached)
             return cached
         data = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(data, columns=['timestamp','open','high','low','close','volume'])
@@ -1644,7 +1594,6 @@ class ExchangeClient:
         df.set_index('timestamp', inplace=True)
         df = df.astype(float)
         self._write_cache(key, df)
-        _mem_cache_set(key, df)
         return df
 
     def fetch_ohlcv_range(self, symbol, timeframe, start, end):
@@ -1674,9 +1623,6 @@ class ExchangeClient:
         df.set_index('timestamp', inplace=True)
         df = df[~df.index.duplicated(keep='first')]
         df = df.astype(float)
-        # 修复：过滤超出 end_date 的数据（交易所最后一批可能多返回）
-        end_dt = pd.Timestamp(end)
-        df = df[df.index <= end_dt]
         # 写入缓存
         try:
             df.to_csv(cache_file)
@@ -1723,11 +1669,6 @@ class BacktestEngine:
 
         close = df['close'].values
         n = len(close)
-
-        # ── 性能优化：将收益率矩阵预计算为 (n, n) 的上三角稀疏近似
-        #    实际只需要相对于"当前持仓入场价"的收益率，在开仓时按索引直接查
-        #    这里用更简单的方式：预计算 close 相对每个位置的最大/最小收益
-        #    以避免内层循环每步都做除法
 
         cash = capital
         trades = []
@@ -1990,26 +1931,6 @@ class BacktestEngine:
                     elif rsi[i] > 80:
                         sell[i] = True  # 超买，卖出
 
-        elif strategy_type == 'funding_arb':
-            # 资金费率套利回测：用价格 Z-score 作为代理信号
-            # 实盘时依赖真实资金费率，回测阶段用均值回归近似
-            close = df['close'].values
-            zp = params.get('zscore_period', 20)
-            zt = params.get('zscore_threshold', 1.5)  # 套利阈值更低
-            for i in range(max(50, zp), n):
-                window = close[max(0, i - zp):i]
-                if len(window) < zp:
-                    continue
-                mean = np.mean(window)
-                std = np.std(window)
-                if std == 0:
-                    continue
-                z = (close[i] - mean) / std
-                if z <= -zt:
-                    buy[i] = True
-                elif z >= zt:
-                    sell[i] = True
-
         elif strategy_type == 'stat_arb':
             # 均值回归 Z-score
             close = df['close'].values
@@ -2241,8 +2162,7 @@ class LiveTrader:
                                 position_pct = kelly.get('position_pct', position_pct)
                                 state['kelly_info'] = kelly
 
-                            # 修复：使用当前权益而非初始资金，支持复利增长
-                            amount_usdt = state['equity'] * position_pct / 100 * config.leverage
+                            amount_usdt = config.capital * position_pct / 100 * config.leverage
                             if not config.paper and config.api_key:
                                 try:
                                     size = amount_usdt / current_price
@@ -2268,40 +2188,8 @@ class LiveTrader:
                         state['last_signal'] = 'buy'
 
                     elif sig['type'] == 'sell':
-                        # 1. 先平多仓
                         if config.symbol in state['positions'] and state['positions'][config.symbol]['side'] == 'long':
                             self._close_position(state, config, client, current_price, 'signal_close_long')
-
-                        # 2. 补全：允许策略开空仓（stat_arb / funding_arb 等需要）
-                        #    只在没有持仓且非 DCA/网格策略时开空
-                        _no_short_strategies = {'smart_dca', 'ai_grid', 'ai_multi_factor', 'lstm', 'transformer', 'rl_ppo'}
-                        if (not state['positions'] and config.type not in _no_short_strategies
-                                and config.leverage > 1):
-                            # 杠杆 > 1 才允许做空（现货通常无法做空）
-                            position_pct = config.position_size_pct
-                            if risk:
-                                kelly = risk.kelly.calculate(config.id)
-                                position_pct = kelly.get('position_pct', position_pct)
-                            amount_usdt = state['equity'] * position_pct / 100 * config.leverage
-                            if not config.paper and config.api_key:
-                                try:
-                                    size = amount_usdt / current_price
-                                    order = client.create_market_order(config.symbol, 'sell', size)
-                                    logger.info(f"Short order placed: {order}")
-                                except Exception as e:
-                                    state['errors'].append(str(e))
-                                    state['last_signal'] = 'sell'
-                                    continue
-                            state['positions'][config.symbol] = {
-                                'side': 'short',
-                                'size': amount_usdt / current_price,
-                                'entry_price': current_price,
-                                'current_price': current_price,
-                                'opened_at': datetime.now().isoformat(),
-                            }
-                            state['highest_price'] = current_price
-                            state['lowest_price'] = current_price
-                            logger.info(f"Strategy {config.id} SHORT size={amount_usdt:.2f} @ {current_price:.2f}")
                         state['last_signal'] = 'sell'
 
                 # ============================================================

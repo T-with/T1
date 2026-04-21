@@ -155,13 +155,10 @@ CURRENT_SCHEMA_VERSION = 1
 class Database:
     """线程安全的 SQLite 封装 (WAL 模式 + 连接池)"""
 
+    _local = threading.local()
+
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
-        # 修复：_local 必须是实例属性，而非类属性
-        # 类属性会导致所有 Database 实例共享同一 thread-local 连接池
-        # 测试时 fixture 创建新 Database(tmp_path/test.db)，
-        # 但 _get_conn() 发现 _local.conn 已存在就直接返回旧连接（错误的数据库！）
-        self._local = threading.local()
         self._init_lock = threading.Lock()
         self._initialized = False
         self._ensure_schema()

@@ -1,18 +1,4 @@
 """MyTradingPlatform Flask App"""
-
-# === Phase 3: 结构化日志 / 指标 / 报警 (必须在其他 import 前) ===
-try:
-    from engine.logging_setup import setup_logging, get_logger, bind_context, clear_context, LogContext
-    setup_logging()
-    _structlog = get_logger('app')
-    from engine.metrics import metrics, start_metrics_snapshot_thread
-    from engine.alerts import alert_manager, Alert, Severity, risk_event_to_alert
-    _phase3_ok = True
-except ImportError:
-    _phase3_ok = False
-    import logging as _logging
-    _structlog = _logging.getLogger('app')
-
 from flask import Flask, render_template, jsonify, request
 from functools import wraps
 import json
@@ -41,46 +27,9 @@ from engine.sentiment import sentiment_engine
 from engine.models import model_manager
 from engine.rl import rl_manager
 
-# === Phase 2: 持久化 + 对账 + Kill Switch ===
-try:
-    from engine.storage import (
-        db as _db, strategy_repo, exchange_repo,
-        trade_repo, position_repo, risk_event_repo, audit_repo,
-    )
-    from engine.reconciliation import PositionReconciler
-    from engine.kill_switch import KillSwitch
-    reconciler = PositionReconciler(position_repo, risk_event_repo)
-    kill_switch = KillSwitch(audit_repo, risk_event_repo)
-    _phase2_ok = True
-except ImportError:
-    _phase2_ok = False
-
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ─── Phase 3: 请求级中间件 ────────────────────────────────────────
-import time as _time
-import uuid as _uuid
-
-@app.before_request
-def _before_req():
-    request._start_ts = _time.time()
-    rid = _uuid.uuid4().hex[:8]
-    request._request_id = rid
-    if _phase3_ok:
-        bind_context(request_id=rid, method=request.method, path=request.path)
-
-@app.after_request
-def _after_req(response):
-    try:
-        if _phase3_ok:
-            duration = _time.time() - getattr(request, '_start_ts', _time.time())
-            metrics.track_http(request.method, request.path, response.status_code, duration)
-            clear_context()
-    except Exception:
-        pass
-    return response
 
 # ================================================================
 # Basic Auth
@@ -108,7 +57,7 @@ def auth_check():
     # 放行静态资源（如果有）和健康检查
     if request.endpoint and 'static' in request.endpoint:
         return None
-    if request.path in ('/health', '/metrics'):
+    if request.path == '/health':
         return None
     auth = request.authorization
     if not auth or not check_auth(auth.username, auth.password):
@@ -143,41 +92,22 @@ order_router = SmartOrderRouter(_make_exchange_client, data_manager)
 
 
 def load_strategies() -> dict:
-    if _phase2_ok:
-        return strategy_repo.list_all()
     if STRATEGIES_FILE.exists():
         return json.loads(STRATEGIES_FILE.read_text())
     return {}
 
 def save_strategies(data: dict):
-    if _phase2_ok:
-        for sid, cfg in data.items():
-            strategy_repo.upsert(sid, cfg)
-        return
     STRATEGIES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
-def save_strategy(sid: str, config: dict):
-    """写单个策略 (Phase 2 新增)"""
-    if _phase2_ok:
-        strategy_repo.upsert(sid, config)
-    else:
-        strategies = load_strategies()
-        strategies[sid] = config
-        save_strategies(strategies)
-
 def load_exchange() -> dict:
-    if _phase2_ok:
-        raw = exchange_repo.get()
-        return decrypt_exchange_config(raw) if raw else {}
     if EXCHANGE_FILE.exists():
         raw = json.loads(EXCHANGE_FILE.read_text())
+        # 返回解密版本供内部使用
         return decrypt_exchange_config(raw)
     return {}
 
 def load_exchange_raw() -> dict:
     """加载原始（含加密标记）的交易所配置"""
-    if _phase2_ok:
-        return exchange_repo.get()
     if EXCHANGE_FILE.exists():
         return json.loads(EXCHANGE_FILE.read_text())
     return {}
@@ -250,10 +180,7 @@ def api_save_exchange():
             data[field] = existing.get(field, '')
     # 加密后存储
     encrypted = encrypt_exchange_config(data)
-    if _phase2_ok:
-        exchange_repo.save(encrypted)
-    else:
-        EXCHANGE_FILE.write_text(json.dumps(encrypted, ensure_ascii=False, indent=2))
+    EXCHANGE_FILE.write_text(json.dumps(encrypted, ensure_ascii=False, indent=2))
     logger.info("Exchange config saved (secrets encrypted)")
     return jsonify({'ok': True})
 
@@ -1226,108 +1153,6 @@ def api_multi_exchange_positions():
 # ================================================================
 # 启动
 # ================================================================
-
-
-
-
-# ================================================================
-# Phase 3: /metrics 端点
-# ================================================================
-if _phase3_ok:
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-
-    @app.route('/metrics', methods=['GET'])
-    def api_metrics():
-        return generate_latest(metrics.registry), 200, {'Content-Type': CONTENT_TYPE_LATEST}
-
-    @app.route('/api/alerts/status', methods=['GET'])
-    def api_alerts_status():
-        return jsonify({
-            'channels': [c.name for c in alert_manager.channels],
-            'min_severity': alert_manager.min_severity.value,
-            'queue_size': alert_manager._queue.qsize(),
-        })
-
-    @app.route('/api/alerts/test', methods=['POST'])
-    def api_alerts_test():
-        data = request.json or {}
-        alert = Alert(
-            title=data.get('title', 'Test Alert'),
-            message=data.get('message', 'This is a test alert'),
-            severity=Severity(data.get('severity', 'warning')),
-            source='manual_test',
-        )
-        sent = alert_manager.send(alert)
-        return jsonify({'ok': sent, 'channels': [c.name for c in alert_manager.channels]})
-
-
-# ================================================================
-# Phase 2: Kill Switch / 对账 / 交易流水 / 审计
-# ================================================================
-if _phase2_ok:
-    @app.route('/api/kill-switch/status', methods=['GET'])
-    def api_kill_switch_status():
-        return jsonify(kill_switch.status())
-
-    @app.route('/api/kill-switch/activate', methods=['POST'])
-    def api_kill_switch_activate():
-        data = request.json or {}
-        result = kill_switch.activate(
-            reason=data.get('reason', 'Manual trigger via API'),
-            triggered_by=data.get('by', 'api'),
-            live_trader=live_trader,
-            flat_all_positions=bool(data.get('flat_positions', False)),
-            make_exchange_client=_make_exchange_client,
-        )
-        if result.get('ok'):
-            for sid in load_strategies():
-                strategy_repo.update_status(sid, 'stopped')
-        return jsonify(result), (200 if result.get('ok') else 409)
-
-    @app.route('/api/kill-switch/deactivate', methods=['POST'])
-    def api_kill_switch_deactivate():
-        data = request.json or {}
-        return jsonify(kill_switch.deactivate(by=data.get('by', 'admin')))
-
-    @app.route('/api/reconcile/<sid>', methods=['POST'])
-    def api_reconcile(sid):
-        strategies = load_strategies()
-        if sid not in strategies:
-            return jsonify({'error': 'Strategy not found'}), 404
-        raw_config = filter_strategy_config(strategies[sid])
-        raw_config = decrypt_strategy_secrets(raw_config)
-        exchange_cfg = load_exchange()
-        for k in ('exchange_id', 'api_key', 'api_secret', 'passphrase'):
-            raw_config.setdefault(k, exchange_cfg.get(k, ''))
-        config = StrategyConfig(**raw_config)
-        try:
-            client = ExchangeClient(config.exchange_id, config.api_key, config.api_secret, config.passphrase)
-            reports = reconciler.reconcile_strategy(config, client)
-            return jsonify({'strategy_id': sid, 'reports': [r.to_dict() for r in reports],
-                            'all_ok': all(r.status == 'ok' for r in reports)})
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
-
-    @app.route('/api/trades/recent', methods=['GET'])
-    def api_trades_recent():
-        limit = int(request.args.get('limit', 100))
-        sid = request.args.get('strategy_id')
-        trades = trade_repo.recent_for_strategy(sid, limit) if sid else trade_repo.recent_all(limit)
-        return jsonify({'count': len(trades), 'trades': trades})
-
-    @app.route('/api/trades/stats/<sid>', methods=['GET'])
-    def api_strategy_trade_stats(sid):
-        stats = dict(trade_repo.stats_for_strategy(sid) or {})
-        stats['pnl_24h'] = trade_repo.pnl_for_period(sid, 24)
-        stats['pnl_7d'] = trade_repo.pnl_for_period(sid, 24 * 7)
-        stats['pnl_30d'] = trade_repo.pnl_for_period(sid, 24 * 30)
-        return jsonify(stats)
-
-    @app.route('/api/audit/recent', methods=['GET'])
-    def api_audit_recent():
-        limit = int(request.args.get('limit', 100))
-        return jsonify({'entries': audit_repo.recent(limit)})
-
 
 
 if __name__ == '__main__':
