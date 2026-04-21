@@ -1,0 +1,223 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "概览",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "运行中策略 (纸面)",
+      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 1},
+      "targets": [{"expr": "sum(strategies_running{paper=\"true\"})", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "text"}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "运行中策略 (实盘)",
+      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 1},
+      "targets": [{"expr": "sum(strategies_running{paper=\"false\"})", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "熔断状态",
+      "gridPos": {"h": 4, "w": 3, "x": 6, "y": 1},
+      "targets": [{"expr": "circuit_breaker_active", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "value_and_name"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "正常", "color": "green"}, "1": {"text": "熔断中", "color": "red"}}}], "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Kill Switch",
+      "gridPos": {"h": 4, "w": 3, "x": 9, "y": 1},
+      "targets": [{"expr": "kill_switch_active", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "value_and_name"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "未激活", "color": "green"}, "1": {"text": "激活", "color": "red"}}}], "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green"}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "暂停策略数",
+      "gridPos": {"h": 4, "w": 3, "x": 12, "y": 1},
+      "targets": [{"expr": "halted_strategies", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 3}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "总权益 (USDT)",
+      "gridPos": {"h": 4, "w": 4, "x": 15, "y": 1},
+      "targets": [{"expr": "sum(strategy_equity)", "refId": "A"}],
+      "options": {"colorMode": "value", "graphMode": "area", "textMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2, "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "type": "stat",
+      "title": "最大回撤",
+      "gridPos": {"h": 4, "w": 5, "x": 19, "y": 1},
+      "targets": [{"expr": "max(strategy_drawdown_pct)", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "percent", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "orange", "value": 10}, {"color": "red", "value": 15}]}}}
+    },
+
+    {
+      "type": "row",
+      "title": "策略权益",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}
+    },
+    {
+      "type": "timeseries",
+      "title": "各策略权益走势",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [{"expr": "strategy_equity", "refId": "A", "legendFormat": "{{strategy_id}} / {{symbol}}"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "custom": {"lineWidth": 2, "fillOpacity": 10, "showPoints": "never"}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "策略回撤",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [{"expr": "strategy_drawdown_pct", "refId": "A", "legendFormat": "{{strategy_id}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "custom": {"lineWidth": 2, "fillOpacity": 15}, "color": {"mode": "palette-classic"}}}
+    },
+
+    {
+      "type": "row",
+      "title": "交易与订单",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14}
+    },
+    {
+      "type": "timeseries",
+      "title": "交易速率 (按结果)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "targets": [{"expr": "sum by (result) (rate(trades_total[5m]))", "refId": "A", "legendFormat": "{{result}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"lineWidth": 2, "stacking": {"mode": "normal"}}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "订单成交耗时 (P50/P95)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le, type) (rate(order_fill_duration_seconds_bucket[5m])))", "refId": "A", "legendFormat": "P50 {{type}}"},
+        {"expr": "histogram_quantile(0.95, sum by (le, type) (rate(order_fill_duration_seconds_bucket[5m])))", "refId": "B", "legendFormat": "P95 {{type}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"lineWidth": 2}}}
+    },
+    {
+      "type": "heatmap",
+      "title": "单笔盈亏分布",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "targets": [{"expr": "sum by (le) (increase(trade_pnl_usdt_bucket[1h]))", "refId": "A", "format": "heatmap", "legendFormat": "{{le}}"}],
+      "options": {"yAxis": {"unit": "currencyUSD"}, "color": {"scheme": "RdYlGn", "mode": "scheme"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "订单滑点百分比 (P95)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, exchange) (rate(order_slippage_pct_bucket[5m])))", "refId": "A", "legendFormat": "{{exchange}} P95"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "custom": {"lineWidth": 2}}}
+    },
+
+    {
+      "type": "row",
+      "title": "风控与告警",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31}
+    },
+    {
+      "type": "timeseries",
+      "title": "风控事件速率 (按类型)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [{"expr": "sum by (event_type) (rate(risk_events_total[5m]))", "refId": "A", "legendFormat": "{{event_type}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"lineWidth": 2, "fillOpacity": 15}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "告警发送 (按渠道/状态)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [{"expr": "sum by (channel, status) (rate(alerts_sent_total[5m]))", "refId": "A", "legendFormat": "{{channel}}/{{status}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "stat",
+      "title": "过去 1h 风控事件数 (按级别)",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 40},
+      "targets": [{"expr": "sum by (level) (increase(risk_events_total[1h]))", "refId": "A", "legendFormat": "{{level}}"}],
+      "options": {"colorMode": "background", "orientation": "horizontal"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}}}
+    },
+
+    {
+      "type": "row",
+      "title": "HTTP 与外部调用",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 44}
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP 请求速率 (按状态码)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 45},
+      "targets": [{"expr": "sum by (status) (rate(http_requests_total[5m]))", "refId": "A", "legendFormat": "{{status}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"lineWidth": 2, "stacking": {"mode": "normal"}}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP 延迟 (P50/P95/P99)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 45},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))", "legendFormat": "P50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))", "legendFormat": "P95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))", "legendFormat": "P99", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"lineWidth": 2}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "交易所 API 延迟 (P95)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 53},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, exchange, endpoint) (rate(exchange_api_duration_seconds_bucket[5m])))", "legendFormat": "{{exchange}} / {{endpoint}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "交易所 API 错误率",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 53},
+      "targets": [{"expr": "sum by (exchange, error_type) (rate(exchange_api_errors_total[5m]))", "legendFormat": "{{exchange}} / {{error_type}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["trading", "platform"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Trading Platform Overview",
+  "uid": "trading-platform-main",
+  "version": 1,
+  "weekStart": ""
+}
